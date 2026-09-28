@@ -20,7 +20,7 @@ import argparse, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 INSTR_RE = re.compile(r'(<Instrument number="(\d+)">)(.*?)(</Instrument>)', re.S)

@@ -244,7 +244,7 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
 <div>
  <section><h2 data-i18n="sec_folders"></h2>
   <div id="folders"></div>
-  <button onclick="addFolder()" data-i18n="btn_add"></button> <button onclick="addSubfolders()" data-i18n="btn_addsub" data-title="title_addsub"></button>
+  <div class="row" style="margin:0"><button onclick="addFolder()" data-i18n="btn_add"></button><button onclick="addSubfolders()" data-i18n="btn_addsub" data-title="title_addsub"></button><button id="btnClear" onclick="clearFolders()" style="margin-left:auto" data-i18n="btn_clear" data-title="title_clear"></button></div>
   <div class="hint" data-i18n="hint_folders"></div>
  </section>
  <section><h2 data-i18n="sec_output"></h2>
@@ -280,7 +280,7 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
 <script>
 const TOKEN="__TOKEN__";
 const I18N={
-en:{hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · Open source (MIT License)",sec_folders:"Sample folders",btn_add:"＋ Add folders",btn_addsub:"＋ Add subfolders of…",
+en:{hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · Open source (MIT License)",sec_folders:"Sample folders",btn_add:"＋ Add folders",btn_addsub:"＋ Add subfolders of…",btn_clear:"Clear all",title_clear:"Remove every folder and its pad assignments",confirm_clear:"Remove all {0} folders and their pad assignments?",cleared:"All folders removed",
  title_addsub:"Adds each subfolder of a parent folder as a separate folder",
  hint_folders:"1) Add folders (⌘-click to pick several, or a parent folder to add all its subfolders) · 2) select one · 3) click the pads on the right to assign it. The folder's color is applied to its pads on the MPC. “Choke” = mute group: pads of folders with the same number cut each other off (e.g. closed and open hi-hat).",
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
@@ -298,7 +298,7 @@ en:{hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · O
  copied:"Bank {0} copied to {1}",need_out:"Missing output folder",need_pads:"Assign a folder to at least one pad",generating:"Generating…",done:"✔ Done",
  busy:"A generation is already running",found:"{0} colors found in the file.",ask_path:"Full path:",ask_paths:"Folder paths separated by ;",
  "col.red":"Red","col.orange":"Orange","col.yellow":"Yellow","col.green":"Green","col.petrol":"Petrol blue","col.lime":"Lime","col.turquoise":"Turquoise","col.cyan":"Cyan","col.blue":"Blue","col.violet":"Violet","col.magenta":"Magenta","col.pink":"Pink","col.white":"White","col.grey":"Grey","col.imported":"Imported"},
-es:{hdr_sub:"· generador de kits .xpm para MPC",footer:"© 2026 Wavethings · Código abierto (Licencia MIT)",sec_folders:"Carpetas de samples",btn_add:"＋ Añadir carpetas",btn_addsub:"＋ Añadir subcarpetas de…",
+es:{hdr_sub:"· generador de kits .xpm para MPC",footer:"© 2026 Wavethings · Código abierto (Licencia MIT)",sec_folders:"Carpetas de samples",btn_add:"＋ Añadir carpetas",btn_addsub:"＋ Añadir subcarpetas de…",btn_clear:"Quitar todas",title_clear:"Quita todas las carpetas y sus asignaciones de pads",confirm_clear:"¿Quitar las {0} carpetas y sus asignaciones de pads?",cleared:"Carpetas quitadas",
  title_addsub:"Añade cada subcarpeta de una carpeta madre como carpeta independiente",
  hint_folders:"1) Añade carpetas (⌘-clic para elegir varias, o una carpeta madre para añadir todas sus subcarpetas) · 2) selecciona una · 3) pulsa los pads de la derecha para asignársela. El color de la carpeta se aplica a sus pads en la MPC. “Choke” = grupo de choque: los pads de carpetas con el mismo número se cortan entre sí (p. ej. hi-hat cerrado y abierto).",
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
@@ -352,6 +352,9 @@ async function addSubfolders(){
   const p=await pathFrom("folder");if(!p)return;
   const r=await api("/api/subfolders",{path:p});const n=await addPaths(r.paths,true);
   $("msg").textContent=t("added_sub",n)+(r.paths.length>n?t("skipped",r.paths.length-n):"")}
+function clearFolders(){
+  if(!S.folders.length||!confirm(t("confirm_clear",S.folders.length)))return;
+  S.folders=[];S.padmap={};active=null;$("msg").textContent=t("cleared");render();save()}
 async function scan(f){const r=await api("/api/scan",{path:f.path,recursive:S.recursive});f.count=r.count}
 function rm(id){S.folders=S.folders.filter(f=>f.id!==id);for(const p in S.padmap){const r=S.padmap[p].filter(x=>x!==id);if(r.length)S.padmap[p]=r;else delete S.padmap[p]}if(active===id)active=null;render();save()}
 function assign(n,add){const cur=S.padmap[n]||[];
@@ -374,7 +377,7 @@ function setColor(v){const f=S.folders.find(x=>x.id===palFor);if(f)f.color=v;$("
 async function importColors(){const p=await pathFrom("xpm");if(!p)return;const r=await api("/api/import_colors",{path:p});
   if(r.error){alert(r.error);return}PAL=r.palette;alert(t("found",r.found));openPal(palFor)}
 function render(){
-  $("lang").value=LANG;
+  $("lang").value=LANG;$("btnClear").disabled=!S.folders.length;
   $("folders").innerHTML=S.folders.map(f=>{const pd=folderPads(f.id);
    return `<div class="card ${f.id===active?"on":""}" onclick="active='${f.id}';render()">
     <span class="dot" style="background:${css(f.color)}" title="${esc(t("chg_color"))}" onclick="event.stopPropagation();openPal('${f.id}')"></span>

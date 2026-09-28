@@ -3,6 +3,11 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-09-28
+
+### Added
+- "Clear all" button to remove every folder (and its pad assignments) at once, with a confirmation.
+
 ## [1.0.0] - 2026-09-28
 
 First public release as **Wavethings Kit Creator**.
