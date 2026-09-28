@@ -171,6 +171,31 @@ class Interface(unittest.TestCase):
             urllib.request.urlopen(self.base + "/api/state")
         self.assertEqual(cm.exception.code, 403)
 
+    def test_presets_save_overwrite_delete_and_persist(self):
+        preset = {"folders": [{"id": "f1", "path": "/x/Kicks", "color": 0x7F0000, "mute": 0, "count": 9},
+                              {"id": "f2", "path": "/x/Hats", "color": 0x007F00, "mute": 1}],
+                  "padmap": {"1": ["f1"], "3": ["f2", "f1"], "4": "f2"}}
+        r = self.api("/api/presets", {"action": "save", "name": "  My Trance  ", "preset": preset})
+        saved = r["presets"]["My Trance"]                       # name is trimmed
+        self.assertEqual(saved["padmap"]["4"], ["f2"])          # old single-id format is normalized
+        self.assertNotIn("count", saved["folders"][0])          # only what a preset stores
+        self.assertEqual(saved["folders"][1]["mute"], 1)
+        self.assertIn("My Trance", self.api("/api/state")["presets"])
+        self.assertIn("My Trance", json.loads(gui.PRESETS_FILE.read_text(encoding="utf-8")))   # on disk
+        preset["padmap"] = {"1": ["f1"]}
+        r = self.api("/api/presets", {"action": "save", "name": "My Trance", "preset": preset})
+        self.assertEqual(list(r["presets"]["My Trance"]["padmap"]), ["1"])                     # overwritten
+        r = self.api("/api/presets", {"action": "delete", "name": "My Trance"})
+        self.assertNotIn("My Trance", r["presets"])
+
+    def test_presets_reject_invalid_requests(self):
+        for body in ({"action": "save", "name": "", "preset": {"folders": [], "padmap": {}}},
+                     {"action": "save", "name": "x", "preset": {"folders": "no", "padmap": {}}},
+                     {"action": "save", "name": "x"},
+                     {"action": "explode", "name": "x"}):
+            self.assertEqual(self.api("/api/presets", body), {"error": "invalid"}, body)
+        self.assertNotIn("x", self.api("/api/state")["presets"])
+
     def test_generate_through_api(self):
         tmp = Path(tempfile.mkdtemp())
         for i in range(3):
@@ -187,6 +212,18 @@ class Interface(unittest.TestCase):
             threading.Event().wait(0.1)
         self.assertIsNone(job["error"], job)
         self.assertTrue((tmp / "out" / "K 2" / "K 2.xpm").is_file())
+
+
+class DataFolder(unittest.TestCase):
+    def test_env_override_and_user_folder(self):
+        self.assertEqual(gui.default_data_dir(), Path(os.environ["KITCREATOR_DATA"]))
+        old = os.environ.pop("KITCREATOR_DATA")
+        try:
+            d = gui.default_data_dir()
+            self.assertEqual(d.name, "Wavethings Kit Creator")
+            self.assertNotEqual(d.parent, ROOT)              # never inside the project folder
+        finally:
+            os.environ["KITCREATOR_DATA"] = old
 
 
 class CommandLine(unittest.TestCase):

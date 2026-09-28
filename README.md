@@ -25,6 +25,7 @@ kits as you want, each with different random samples.
 - Add many folders at once (⌘-click, or a parent folder to add all its subfolders).
 - 8 banks (A–H, 128 pads) with **copy bank → another bank / all banks**.
 - **Mute groups (choke)** per folder, e.g. closed + open hi-hat.
+- **Presets**: save and recall your folders, pad assignments, choke groups and colors.
 - **Pad colors** per folder; pads that mix folders show diagonal stripes.
 - Built-in empty template (no `.xpm` needed), or use your own as a base.
 - English / Español interface: starts in your browser's language, switch at the top right.
@@ -47,8 +48,8 @@ kits as you want, each with different random samples.
 ### Make a double-clickable macOS app
     python3 build_app.py
 Drag the generated `Wavethings Kit Creator.app` to Applications. Closing the browser tab quits the app. Run
-`build_app.py` again after updating the scripts. Settings are kept in
-`~/Library/Application Support/Wavethings Kit Creator/`.
+`build_app.py` again after updating the scripts. Settings and presets are kept in
+`~/Library/Application Support/Wavethings Kit Creator/` (Windows: `%APPDATA%`, Linux: `~/.config`); back up `mpc_presets.json` to keep your presets.
 
 ### Command line (no interface)
     python3 mpc_kit_creator.py -o ~/MPC_Kits -n 20 \
@@ -90,6 +91,7 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 - Añade muchas carpetas a la vez (⌘-clic, o una carpeta madre para añadir todas sus subcarpetas).
 - 8 bancos (A–H, 128 pads) con **copia de banco → otro banco / todos**.
 - **Grupos de choque (choke)** por carpeta, p. ej. hi-hat cerrado y abierto.
+- **Presets**: guarda y recupera tus carpetas, asignaciones de pads, grupos de choque y colores.
 - **Colores de pad** por carpeta; los pads con varias carpetas se ven con franjas diagonales.
 - Plantilla vacía integrada (no hace falta ningún `.xpm`), o usa la tuya como base.
 - Interfaz English / Español: empieza en el idioma del navegador y se cambia arriba a la derecha.
@@ -112,8 +114,8 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 ### App de macOS con doble clic
     python3 build_app.py
 Arrastra `Wavethings Kit Creator.app` a Aplicaciones. Al cerrar la pestaña del navegador la app se cierra sola. Vuelve
-a ejecutar `build_app.py` tras actualizar los scripts. La configuración se guarda en
-`~/Library/Application Support/Wavethings Kit Creator/`.
+a ejecutar `build_app.py` tras actualizar los scripts. La configuración y los presets se guardan en
+`~/Library/Application Support/Wavethings Kit Creator/` (Windows: `%APPDATA%`, Linux: `~/.config`); haz copia de `mpc_presets.json` para conservar tus presets.
 
 ### Línea de comandos (sin interfaz)
     python3 mpc_kit_creator.py -o ~/MPC_Kits -n 20 \

@@ -7,7 +7,7 @@ Usage:  python3 kit_creator_gui.py     (keep mpc_kit_creator.py in the same fold
 Quit with Ctrl+C in the Terminal. The interface language (English / Español) can be
 switched inside the app; it starts in your browser's language.
 """
-import json, os, secrets, subprocess, sys, threading, time, webbrowser
+import json, os, secrets, shutil, subprocess, sys, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -15,10 +15,35 @@ from urllib.parse import parse_qs, urlparse
 import mpc_kit_creator as kc
 
 HERE = Path(__file__).resolve().parent
-DATA = Path(os.environ.get("KITCREATOR_DATA") or HERE)   # the .app keeps its settings here
+
+
+def default_data_dir():
+    """Per-user folder for settings and presets (never inside the project folder)."""
+    env = os.environ.get("KITCREATOR_DATA")
+    if env:
+        return Path(env)
+    home = Path.home()
+    if sys.platform == "darwin":
+        base = home / "Library" / "Application Support"
+    elif sys.platform.startswith("win"):
+        base = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return base / "Wavethings Kit Creator"
+
+
+DATA = default_data_dir()
 DATA.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA / "kit_creator_state.json"
 PAL_FILE = DATA / "mpc_palette.json"
+PRESETS_FILE = DATA / "mpc_presets.json"
+for _name in ("kit_creator_state.json", "mpc_palette.json"):   # v1.0/1.1 kept them next to the script
+    _old = HERE / _name
+    if DATA != HERE and _old.is_file() and not (DATA / _name).exists():
+        try:
+            shutil.copy2(_old, DATA / _name)
+        except OSError:
+            pass
 AUTOQUIT = bool(os.environ.get("KITCREATOR_AUTOQUIT")) or "--auto-quit" in sys.argv
 SEEN = {"last": time.time(), "bye": 0.0}
 TOKEN = secrets.token_hex(16)
@@ -52,6 +77,28 @@ SRV = {  # Terminal messages
 
 def srv(key, **kw):
     return SRV.get(kc.LANG, SRV["en"])[key].format(**kw)
+
+
+def load_presets():
+    try:
+        d = json.loads(PRESETS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def store_presets(d):
+    tmp = PRESETS_FILE.with_suffix(".tmp")      # write then swap: never leaves a half-written file
+    tmp.write_text(json.dumps(d, indent=1, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, PRESETS_FILE)
+
+
+def clean_preset(p):
+    """Keeps only what a preset stores: folders (path, color, mute group) and pad assignments."""
+    folders = [{"id": str(f["id"]), "path": str(f["path"]), "color": int(f.get("color") or 0),
+                "mute": int(f.get("mute") or 0)} for f in p["folders"]]
+    padmap = {str(k): [str(i) for i in (v if isinstance(v, list) else [v])] for k, v in p["padmap"].items()}
+    return {"folders": folders, "padmap": padmap}
 
 
 def palette():
@@ -148,7 +195,8 @@ class H(BaseHTTPRequestHandler):
                 st = json.loads(STATE_FILE.read_text())
             except (OSError, ValueError):
                 st = None
-            return self.send({"state": st, "palette": palette(), "mac": sys.platform == "darwin"})
+            return self.send({"state": st, "palette": palette(), "presets": load_presets(),
+                              "mac": sys.platform == "darwin"})
         if self.path == "/api/job":
             return self.send(JOB)
         if self.path == "/api/ping":
@@ -169,6 +217,22 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/api/pick":
             path, err = pick(data["kind"], data.get("lang", "en"))
             return self.send({"path": path, "error": err})
+        if self.path == "/api/presets":
+            presets = load_presets()
+            name = str(data.get("name", "")).strip()[:60]
+            try:
+                if data.get("action") == "save":
+                    if not name:
+                        raise ValueError
+                    presets[name] = clean_preset(data["preset"])
+                elif data.get("action") == "delete":
+                    presets.pop(name, None)
+                else:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, AttributeError):
+                return self.send({"error": "invalid"})
+            store_presets(presets)
+            return self.send({"presets": presets})
         if self.path == "/api/subfolders":
             d = Path(data["path"]).expanduser()
             subs = sorted((str(x) for x in d.iterdir() if x.is_dir() and not x.name.startswith(".")),
@@ -242,6 +306,10 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
 <header><span><b class="brand">Wavethings</b> Kit Creator <span class="sub" data-i18n="hdr_sub"></span></span><select id="lang"><option value="en">English</option><option value="es">Español</option></select></header>
 <main>
 <div>
+ <section><h2 data-i18n="sec_presets"></h2>
+  <div class="row" style="margin:0"><select class="big" id="presetSel" style="flex:1;min-width:0"></select><button id="btnPload" onclick="loadPreset()" data-i18n="btn_pload"></button><button id="btnPsave" onclick="savePreset()" data-i18n="btn_psave"></button><button id="btnPdel" onclick="deletePreset()" data-i18n="btn_pdel"></button></div>
+  <div class="hint" data-i18n="hint_presets"></div>
+ </section>
  <section><h2 data-i18n="sec_folders"></h2>
   <div id="folders"></div>
   <div class="row" style="margin:0"><button onclick="addFolder()" data-i18n="btn_add"></button><button onclick="addSubfolders()" data-i18n="btn_addsub" data-title="title_addsub"></button><button id="btnClear" onclick="clearFolders()" style="margin-left:auto" data-i18n="btn_clear" data-title="title_clear"></button></div>
@@ -280,7 +348,12 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
 <script>
 const TOKEN="__TOKEN__";
 const I18N={
-en:{hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · Open source (MIT License)",sec_folders:"Sample folders",btn_add:"＋ Add folders",btn_addsub:"＋ Add subfolders of…",btn_clear:"Clear all",title_clear:"Remove every folder and its pad assignments",confirm_clear:"Remove all {0} folders and their pad assignments?",cleared:"All folders removed",
+en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete",preset_none:"(no presets yet)",preset_choose:"Choose a preset…",
+ hint_presets:"A preset remembers your folders, pad assignments, choke groups and colors. Folder paths are saved as they are on this computer.",
+ preset_name:"Preset name:",preset_overwrite:"A preset called “{0}” already exists. Overwrite it?",preset_saved:"Preset “{0}” saved",
+ preset_load_confirm:"Replace the current folders and pad assignments with preset “{0}”?",preset_loaded:"Preset “{0}” loaded",
+ preset_missing:" · {0} folder(s) not found (is a drive disconnected?)",preset_delete_confirm:"Delete preset “{0}”?",preset_need_folders:"Add at least one folder first",
+ hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · Open source (MIT License)",sec_folders:"Sample folders",btn_add:"＋ Add folders",btn_addsub:"＋ Add subfolders of…",btn_clear:"Clear all",title_clear:"Remove every folder and its pad assignments",confirm_clear:"Remove all {0} folders and their pad assignments?",cleared:"All folders removed",
  title_addsub:"Adds each subfolder of a parent folder as a separate folder",
  hint_folders:"1) Add folders (⌘-click to pick several, or a parent folder to add all its subfolders) · 2) select one · 3) click the pads on the right to assign it. The folder's color is applied to its pads on the MPC. “Choke” = mute group: pads of folders with the same number cut each other off (e.g. closed and open hi-hat).",
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
@@ -298,7 +371,12 @@ en:{hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · O
  copied:"Bank {0} copied to {1}",need_out:"Missing output folder",need_pads:"Assign a folder to at least one pad",generating:"Generating…",done:"✔ Done",
  busy:"A generation is already running",found:"{0} colors found in the file.",ask_path:"Full path:",ask_paths:"Folder paths separated by ;",
  "col.red":"Red","col.orange":"Orange","col.yellow":"Yellow","col.green":"Green","col.petrol":"Petrol blue","col.lime":"Lime","col.turquoise":"Turquoise","col.cyan":"Cyan","col.blue":"Blue","col.violet":"Violet","col.magenta":"Magenta","col.pink":"Pink","col.white":"White","col.grey":"Grey","col.imported":"Imported"},
-es:{hdr_sub:"· generador de kits .xpm para MPC",footer:"© 2026 Wavethings · Código abierto (Licencia MIT)",sec_folders:"Carpetas de samples",btn_add:"＋ Añadir carpetas",btn_addsub:"＋ Añadir subcarpetas de…",btn_clear:"Quitar todas",title_clear:"Quita todas las carpetas y sus asignaciones de pads",confirm_clear:"¿Quitar las {0} carpetas y sus asignaciones de pads?",cleared:"Carpetas quitadas",
+es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Borrar",preset_none:"(aún no hay presets)",preset_choose:"Elige un preset…",
+ hint_presets:"Un preset recuerda tus carpetas, asignaciones de pads, grupos de choque y colores. Las rutas se guardan tal como están en este equipo.",
+ preset_name:"Nombre del preset:",preset_overwrite:"Ya existe un preset llamado «{0}». ¿Sobrescribirlo?",preset_saved:"Preset «{0}» guardado",
+ preset_load_confirm:"¿Reemplazar las carpetas y asignaciones actuales por el preset «{0}»?",preset_loaded:"Preset «{0}» cargado",
+ preset_missing:" · {0} carpeta(s) no encontrada(s) (¿hay un disco desconectado?)",preset_delete_confirm:"¿Borrar el preset «{0}»?",preset_need_folders:"Añade primero alguna carpeta",
+ hdr_sub:"· generador de kits .xpm para MPC",footer:"© 2026 Wavethings · Código abierto (Licencia MIT)",sec_folders:"Carpetas de samples",btn_add:"＋ Añadir carpetas",btn_addsub:"＋ Añadir subcarpetas de…",btn_clear:"Quitar todas",title_clear:"Quita todas las carpetas y sus asignaciones de pads",confirm_clear:"¿Quitar las {0} carpetas y sus asignaciones de pads?",cleared:"Carpetas quitadas",
  title_addsub:"Añade cada subcarpeta de una carpeta madre como carpeta independiente",
  hint_folders:"1) Añade carpetas (⌘-clic para elegir varias, o una carpeta madre para añadir todas sus subcarpetas) · 2) selecciona una · 3) pulsa los pads de la derecha para asignársela. El color de la carpeta se aplica a sus pads en la MPC. “Choke” = grupo de choque: los pads de carpetas con el mismo número se cortan entre sí (p. ej. hi-hat cerrado y abierto).",
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
@@ -324,8 +402,8 @@ function applyStatic(){
   document.querySelectorAll("[data-title]").forEach(e=>e.title=t(e.dataset.title));
   document.documentElement.lang=LANG}
 const colName=c=>{const m=/^Import(?:ed|ado) (\d+)$/.exec(c.name);return m?t("col.imported")+" "+m[1]:(I18N[LANG]["col."+c.name]||c.name)};
-const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,lang:"",folders:[],padmap:{}};
-let PAL=[],active=null,bank=0,palFor=null,MAC=true,saveT=null,copyTarget="all";
+const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,lang:"",preset:"",folders:[],padmap:{}};
+let PAL=[],PRESETS={},active=null,bank=0,palFor=null,MAC=true,saveT=null,copyTarget="all";
 const $=id=>document.getElementById(id), BANKS="ABCDEFGH";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const css=v=>v?`rgb(${((v>>16)&127)*2},${((v>>8)&127)*2},${(v&127)*2})`:"#3a3d44";
@@ -355,6 +433,25 @@ async function addSubfolders(){
 function clearFolders(){
   if(!S.folders.length||!confirm(t("confirm_clear",S.folders.length)))return;
   S.folders=[];S.padmap={};active=null;$("msg").textContent=t("cleared");render();save()}
+async function savePreset(){
+  if(!S.folders.length){$("msg").textContent=t("preset_need_folders");return}
+  const name=(prompt(t("preset_name"),S.preset||"")||"").trim().slice(0,60);if(!name)return;
+  if(PRESETS[name]&&!confirm(t("preset_overwrite",name)))return;
+  const preset={folders:S.folders.map(f=>({id:f.id,path:f.path,color:f.color||0,mute:f.mute||0})),padmap:S.padmap};
+  const r=await api("/api/presets",{action:"save",name,preset});if(r.error)return;
+  PRESETS=r.presets;S.preset=name;$("msg").textContent=t("preset_saved",name);render();save()}
+async function loadPreset(){
+  const name=$("presetSel").value,p=PRESETS[name];if(!p)return;
+  if(S.folders.length&&!confirm(t("preset_load_confirm",name)))return;
+  S.folders=p.folders.map(f=>({...f,count:0}));S.padmap=JSON.parse(JSON.stringify(p.padmap));
+  active=S.folders.length?S.folders[0].id:null;S.preset=name;
+  for(const f of S.folders)await scan(f);
+  const missing=S.folders.filter(f=>f.count<0).length;
+  $("msg").textContent=t("preset_loaded",name)+(missing?t("preset_missing",missing):"");render();save()}
+async function deletePreset(){
+  const name=$("presetSel").value;if(!PRESETS[name]||!confirm(t("preset_delete_confirm",name)))return;
+  const r=await api("/api/presets",{action:"delete",name});if(r.error)return;
+  PRESETS=r.presets;if(S.preset===name)S.preset="";render();save()}
 async function scan(f){const r=await api("/api/scan",{path:f.path,recursive:S.recursive});f.count=r.count}
 function rm(id){S.folders=S.folders.filter(f=>f.id!==id);for(const p in S.padmap){const r=S.padmap[p].filter(x=>x!==id);if(r.length)S.padmap[p]=r;else delete S.padmap[p]}if(active===id)active=null;render();save()}
 function assign(n,add){const cur=S.padmap[n]||[];
@@ -378,6 +475,9 @@ async function importColors(){const p=await pathFrom("xpm");if(!p)return;const r
   if(r.error){alert(r.error);return}PAL=r.palette;alert(t("found",r.found));openPal(palFor)}
 function render(){
   $("lang").value=LANG;$("btnClear").disabled=!S.folders.length;
+  const pn=Object.keys(PRESETS).sort((a,b)=>a.localeCompare(b));
+  $("presetSel").innerHTML=pn.length?`<option value="">${esc(t("preset_choose"))}</option>`+pn.map(n=>`<option value="${esc(n)}" ${n===S.preset?"selected":""}>${esc(n)}</option>`).join(""):`<option value="">${esc(t("preset_none"))}</option>`;
+  $("btnPload").disabled=$("btnPdel").disabled=!pn.length;$("btnPsave").disabled=!S.folders.length;
   $("folders").innerHTML=S.folders.map(f=>{const pd=folderPads(f.id);
    return `<div class="card ${f.id===active?"on":""}" onclick="active='${f.id}';render()">
     <span class="dot" style="background:${css(f.color)}" title="${esc(t("chg_color"))}" onclick="event.stopPropagation();openPal('${f.id}')"></span>
@@ -408,7 +508,7 @@ async function generate(){
    if(j.done){clearInterval(iv);$("go").disabled=false;if(j.error){m.className="err";m.textContent=j.error}else m.textContent=t("done")}},400)}
 setInterval(()=>api("/api/ping"),5000);
 addEventListener("pagehide",()=>navigator.sendBeacon("/api/bye?t="+TOKEN));
-(async()=>{const r=await api("/api/state");PAL=r.palette;MAC=r.mac;if(r.state)Object.assign(S,r.state);for(const p in S.padmap)if(!Array.isArray(S.padmap[p]))S.padmap[p]=[S.padmap[p]];
+(async()=>{const r=await api("/api/state");PAL=r.palette;PRESETS=r.presets||{};MAC=r.mac;if(r.state)Object.assign(S,r.state);for(const p in S.padmap)if(!Array.isArray(S.padmap[p]))S.padmap[p]=[S.padmap[p]];
   LANG=S.lang&&I18N[S.lang]?S.lang:((navigator.language||"en").toLowerCase().startsWith("es")?"es":"en");S.lang=LANG;
   for(const f of S.folders)await scan(f);active=S.folders.length?S.folders[0].id:null;applyStatic();render()})();
 </script></html>'''
