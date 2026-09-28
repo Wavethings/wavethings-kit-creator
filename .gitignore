@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Built app and local settings
+*.app/
+*.iconset/
+kit_creator_state.json
+mpc_palette.json
+log.txt
+
+# Generated kits
+MPC_Kits/
+out/
+kits/
