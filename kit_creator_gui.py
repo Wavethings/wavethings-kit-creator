@@ -284,13 +284,14 @@ button:disabled{opacity:.5}input[type=text],input[type=number]{background:#17181
 .row{display:flex;gap:8px;align-items:center;margin-bottom:8px}.row label{width:90px;color:var(--mu);flex:none}
 .path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mu);direction:rtl;text-align:left}
 .card{display:flex;gap:10px;align-items:center;border:2px solid var(--ln);border-radius:8px;padding:8px 10px;margin-bottom:8px;cursor:pointer;background:#202226}
-.card.on{border-color:var(--ac);background:#1f2a3f}.fi{flex:1;min-width:0}.fi b{display:block}
+.card.on{border-color:var(--ac);background:#1f2a3f}.card{min-width:0}
+.fi{flex:1;min-width:0}.fi b{display:block}
 .fi small{color:var(--mu);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dot{width:26px;height:26px;border-radius:50%;border:2px solid #fff3;flex:none;cursor:pointer}
 .tabs{display:flex;gap:4px;margin-bottom:10px}.tabs button{flex:1;padding:5px 0}.tabs .sel{background:var(--ac);border-color:var(--ac)}
 .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.pad{aspect-ratio:1;border-radius:8px;border:1px solid #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#2e3035;cursor:pointer;color:#fffc;font-weight:600;user-select:none}
-.pad small{font-weight:400;font-size:10px;max-width:90%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pad{aspect-ratio:1;min-width:0;min-height:0;overflow:hidden;border-radius:8px;border:1px solid #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#2e3035;cursor:pointer;color:#fffc;font-weight:600;user-select:none}
+.pad small{width:100%;box-sizing:border-box;padding:0 4px;font-weight:400;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
 .pad:hover{outline:2px solid #fff6}.hint{color:var(--mu);font-size:12px;margin-top:8px}
 .chk{display:flex;gap:6px;align-items:center;margin:4px 0;color:var(--mu)}
 #pal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9}

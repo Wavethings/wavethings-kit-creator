@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-09-28
+
+### Fixed
+- A long folder name (e.g. "Drum - Hat Closed - One Shot") could stretch its whole pad column
+  and push the grid past its panel, because CSS Grid never shrinks a column below its content's
+  natural width by default. Pad names are now always truncated to a fixed-size grid.
+
 ## [1.2.0] - 2026-09-28
 
 ### Added
