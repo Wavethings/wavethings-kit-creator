@@ -20,9 +20,56 @@ import argparse, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
+
+# ---------------------------------------------------------------- musical key detection
+# Looks for a root note in the file name: an uppercase letter A-G, with an optional
+# accidental (# or b), octave number and minor marker (m / min), e.g. "Bass_C1.wav",
+# "Synth_Dm.wav", "Lead - F#3.wav", "Chord_Bb2.wav", "Pad_G#m.wav". The note must stand as
+# its own token (surrounded by the start/end of the name or a non letter/digit character)
+# and use an UPPERCASE letter, which is how virtually every sample pack tags keys; this
+# keeps ordinary words (e.g. "e_piano", "Bass") from being misread as note names. Known
+# limitations: "Bmaj7" and combinations like "A#m3" (octave after the minor marker) are not
+# recognized; a bare letter with no accidental/octave/minor marker ("Take_A.wav") is treated
+# as a note, which is occasionally a false positive.
+_KEY_BASE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+_KEY_SHARPS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+KEY_RE = re.compile(r"(?<![A-Za-z0-9])([A-G])(#|b)?(-?[0-8])?(m(?:in)?)?(?![A-Za-z0-9])")
+KEY_INPUT_RE = re.compile(r"^\s*([A-G])(#|b)?(m(?:in)?)?\s*$", re.IGNORECASE)
+
+
+def canonical_key(letter, accidental, minor):
+    """('A', '#', True) -> 'A#m'. Normalizes flats to their sharp spelling so 'Db' and 'C#'
+    group together."""
+    semitone = (_KEY_BASE[letter] + (1 if accidental == "#" else -1 if accidental == "b" else 0)) % 12
+    return _KEY_SHARPS[semitone] + ("m" if minor else "")
+
+
+def parse_key(filename):
+    """Returns the canonical key detected in a file name (e.g. "F#", "Dm"), or None."""
+    m = KEY_RE.search(Path(filename).stem)
+    return canonical_key(m.group(1), m.group(2), bool(m.group(4))) if m else None
+
+
+def normalize_key_input(text):
+    """Parses a key typed by hand (e.g. "Dbm", "f#", "Gmin"); returns the canonical form or None."""
+    m = KEY_INPUT_RE.match(text or "")
+    if not m:
+        return None
+    letter, accidental, minor = m.groups()
+    return canonical_key(letter.upper(), accidental.lower() if accidental else None, bool(minor))
+
+
+def index_by_key(files):
+    """{key: [files with that detected key, ...]} for a list of sample paths."""
+    idx = {}
+    for f in files:
+        k = parse_key(f.name)
+        if k:
+            idx.setdefault(k, []).append(f)
+    return idx
 INSTR_RE = re.compile(r'(<Instrument number="(\d+)">)(.*?)(</Instrument>)', re.S)
 LAYER_RE = re.compile(r'(<Layer number="(\d+)">.*?<SampleName>)(.*?)(</SampleName>)', re.S)
 NAME_RE = re.compile(r"<ProgramName>.*?</ProgramName>", re.S)
@@ -56,6 +103,12 @@ MSG = {
         "h_link": "hard-link samples instead of copying them",
         "h_seed": "seed for reproducible results",
         "h_lang": "interface language (default: system language)",
+        "h_key": "filter by key: KEY for a fixed key (e.g. C#m), or no value for a random key "
+                 "per kit; only affects folders where a key was detected in file names",
+        "err_key": "Unrecognized key: {key} (examples: C, F#, Dbm, Gmin)",
+        "key_none": "  ! --match-key was used but no key was detected in any file name: ignored",
+        "kit_key": "[{name}] {n} pads assigned · key {key}",
+        "key_fallback": "  (no {key} sample for pad(s) {pads}: used unfiltered)",
     },
     "es": {
         "no_folder": "No existe la carpeta: {folder}",
@@ -82,6 +135,13 @@ MSG = {
         "h_link": "enlazar en vez de copiar los samples",
         "h_seed": "semilla para resultados reproducibles",
         "h_lang": "idioma de la interfaz (por defecto: el del sistema)",
+        "h_key": "filtrar por tonalidad: TONALIDAD para una fija (p. ej. C#m), o sin valor para "
+                 "una tonalidad al azar por kit; solo afecta a carpetas con tonalidad detectada "
+                 "en los nombres de archivo",
+        "err_key": "Tonalidad no reconocida: {key} (ejemplos: C, F#, Dbm, Gmin)",
+        "key_none": "  ! se usó --match-key pero no se detectó tonalidad en ningún archivo: se ignora",
+        "kit_key": "[{name}] {n} pads asignados · tonalidad {key}",
+        "key_fallback": "  (sin muestra en {key} para el/los pad(s) {pads}: se usó sin filtrar)",
     },
 }
 
@@ -95,8 +155,8 @@ def detect_lang():
 LANG = detect_lang()
 
 
-def msg(key, **kw):
-    text = MSG.get(LANG, MSG["en"])[key]
+def msg(_key, **kw):
+    text = MSG.get(LANG, MSG["en"])[_key]
     return text.format(**kw) if kw else text
 
 
@@ -143,22 +203,37 @@ def scan_folder(folder, recursive=True):
     )
 
 
-def pick_samples(pads, cache, rng):
+def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_folders=None, fallback=None):
     """Pick one sample per pad. With several folders on a pad, a folder is chosen first
     (equal probability for each, regardless of how many samples it has) and then a sample.
-    Avoids repeating a sample within the kit while free ones remain."""
+    Avoids repeating a sample within the kit while free ones remain.
+
+    target_key/folder_keys/tonal_folders (all optional) restrict the choice to samples whose
+    file name matches target_key, but only within folders present in tonal_folders (folders
+    that have at least one sample with a detected key); other folders are never restricted.
+    If a pad's assigned folders have no sample at all in target_key, the restriction is lifted
+    for that pad (it is picked normally) and, if `fallback` is a list, its pad number is
+    appended so the caller can report it."""
+    filtering = bool(target_key and tonal_folders)
     used, chosen = set(), {}
     for pad in sorted(pads):
         srcs = [x for x in dict.fromkeys(pads[pad]) if cache[x]]
         if not srcs:
             continue
-        free = {x: [f for f in cache[x] if f not in used] for x in srcs}
+        pools = {x: (folder_keys[x].get(target_key, []) if filtering and x in tonal_folders else cache[x])
+                 for x in srcs}
+        if filtering and not any(pools.values()):     # no match anywhere for this pad: lift the filter
+            if fallback is not None:
+                fallback.append(pad)
+            pools = {x: cache[x] for x in srcs}
+        free = {x: [f for f in pools[x] if f not in used] for x in srcs}
         avail = [x for x in srcs if free[x]]
         if avail:
             src = rng.choice(avail)
             f = rng.choice(free[src])
         else:                       # everything used: allow repeats
-            f = rng.choice(cache[rng.choice(srcs)])
+            src = rng.choice(srcs)
+            f = rng.choice(pools[src] or cache[src])
         used.add(f)
         chosen[pad] = f
     return chosen
@@ -351,8 +426,15 @@ SqUqo1SsMkrlKqNUsDJKdbLTUWGqk50MC5NpYTIuTOaFycAwmRgmI8NUZlikQsOiTKbgqU52KjcsUsFh
 
 
 def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear_others=True,
-                  recursive=True, hardlink=False, seed=None, log=print, mutegroups=None):
-    """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched)."""
+                  recursive=True, hardlink=False, seed=None, log=print, mutegroups=None,
+                  match_key=None):
+    """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched).
+
+    match_key: None/False disables key filtering. True or "random" picks a different key for
+    each kit, at random among the keys detected in the assigned folders. A specific key (e.g.
+    "C#m", typically from normalize_key_input) fixes that key for every kit. Only folders with
+    at least one sample whose file name carries a detected key are restricted by the filter;
+    others (e.g. drums) are unaffected. name_pat may use "{key}" to include the kit's key."""
     cache = {}
     for folder in {f for fl in pads.values() for f in fl}:
         if not folder.is_dir():
@@ -362,6 +444,18 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
         if not cache[folder]:
             log(msg("empty"))
 
+    folder_keys, tonal_folders, available_keys = {}, set(), []
+    if match_key:
+        for folder, files in cache.items():
+            idx = index_by_key(files)
+            if idx:
+                folder_keys[folder] = idx
+                tonal_folders.add(folder)
+        available_keys = sorted({k for idx in folder_keys.values() for k in idx})
+        if not available_keys:
+            log(msg("key_none"))
+            match_key = None
+
     rng = random.Random(seed)
     out_root = Path(out_root).expanduser()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -369,11 +463,16 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
     n = 0
     for _ in range(n_kits):
         n += 1
-        name = name_pat.format(n=n)
+        target_key = None
+        if match_key:
+            target_key = (rng.choice(available_keys) if match_key is True or match_key == "random"
+                         else match_key)
+        name = name_pat.format(n=n, key=target_key or "")
         while (out_root / name).exists():      # never overwrite existing kits
             n += 1
-            name = name_pat.format(n=n)
-        chosen = pick_samples(pads, cache, rng)
+            name = name_pat.format(n=n, key=target_key or "")
+        fallback_pads = [] if target_key else None
+        chosen = pick_samples(pads, cache, rng, target_key, folder_keys, tonal_folders, fallback_pads)
         stems = unique_stems(chosen)
         kit_dir = out_root / name
         kit_dir.mkdir()
@@ -393,7 +492,13 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
         if colors is not None:
             xpm = set_pad_colors(xpm, colors, clear_others)
         (kit_dir / f"{name}.xpm").write_text(xpm, encoding="utf-8")
-        log(msg("kit", name=name, n=len(assignment)))
+        if target_key:
+            log(msg("kit_key", name=name, n=len(assignment), key=target_key))
+            if fallback_pads:
+                log(msg("key_fallback", key=target_key,
+                       pads=", ".join(str(p) for p in sorted(set(fallback_pads)))))
+        else:
+            log(msg("kit", name=name, n=len(assignment)))
     log(msg("done", n=n_kits, out=out_root))
 
 
@@ -417,6 +522,7 @@ def main():
     ap.add_argument("--keep-others", action="store_true", help=msg("h_keep"))
     ap.add_argument("--hardlink", action="store_true", help=msg("h_link"))
     ap.add_argument("--seed", type=int, help=msg("h_seed"))
+    ap.add_argument("--match-key", nargs="?", const="random", default=None, metavar="KEY", help=msg("h_key"))
     ap.add_argument("--lang", choices=["en", "es"], help=msg("h_lang"))
     a = ap.parse_args()
 
@@ -432,6 +538,12 @@ def main():
     clear_others = not a.keep_others and cfg.get("clear_unassigned", True)
     hardlink = a.hardlink or cfg.get("hardlink", False)
     seed = a.seed if a.seed is not None else cfg.get("seed")
+    match_key = a.match_key if a.match_key is not None else cfg.get("match_key")
+    if match_key not in (None, False, True, "random"):
+        normalized = normalize_key_input(match_key)
+        if not normalized:
+            ap.error(msg("err_key", key=match_key))
+        match_key = normalized
 
     pads = {}
     for spec, folders in cfg.get("pads", {}).items():
@@ -479,7 +591,7 @@ def main():
     try:
         generate_kits(template, output, n_kits, name_pat, pads, clear_others=clear_others,
                       recursive=recursive, hardlink=hardlink, seed=seed,
-                      mutegroups=mutegroups or None)
+                      mutegroups=mutegroups or None, match_key=match_key)
     except FileNotFoundError as e:
         sys.exit(str(e))
 

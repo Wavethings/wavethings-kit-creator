@@ -26,6 +26,7 @@ kits as you want, each with different random samples.
 - 8 banks (A–H, 128 pads) with **copy bank → another bank / all banks**.
 - **Mute groups (choke)** per folder, e.g. closed + open hi-hat.
 - **Presets**: save and recall your folders, pad assignments, choke groups and colors.
+- **Filter by key**: detects the root note in file names (e.g. "Bass_C1", "Synth_Dm") and keeps every kit in one key, fixed or random per kit; folders without a detected key are unaffected.
 - **Pad colors** per folder; pads that mix folders show diagonal stripes.
 - Built-in empty template (no `.xpm` needed), or use your own as a base.
 - English / Español interface: starts in your browser's language, switch at the top right.
@@ -54,7 +55,7 @@ Drag the generated `Wavethings Kit Creator.app` to Applications. Closing the bro
 ### Command line (no interface)
     python3 mpc_kit_creator.py -o ~/MPC_Kits -n 20 \
         --pad 1=~/Samples/Kicks --pad 2=~/Samples/Snares --pad 3-4=~/Samples/Hats --mute 3-4=1
-or `python3 mpc_kit_creator.py -c config_example.json`. Use `--lang en|es` to force a language and `-h` for all options.
+or `python3 mpc_kit_creator.py -c config_example.json`. Use `--lang en|es` to force a language, `--match-key [KEY]` to filter by key (omit KEY for a random key per kit), and `-h` for all options.
 
 ## Loading kits on the MPC
 Each kit is a folder containing the `.xpm` and its samples. Copy the kit folders to your MPC's storage (or your
@@ -92,6 +93,7 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 - 8 bancos (A–H, 128 pads) con **copia de banco → otro banco / todos**.
 - **Grupos de choque (choke)** por carpeta, p. ej. hi-hat cerrado y abierto.
 - **Presets**: guarda y recupera tus carpetas, asignaciones de pads, grupos de choque y colores.
+- **Filtro por tonalidad**: detecta la nota raíz en los nombres de archivo (p. ej. "Bass_C1", "Synth_Dm") y mantiene cada kit en una sola tonalidad, fija o al azar por kit; las carpetas sin tonalidad detectada no se ven afectadas.
 - **Colores de pad** por carpeta; los pads con varias carpetas se ven con franjas diagonales.
 - Plantilla vacía integrada (no hace falta ningún `.xpm`), o usa la tuya como base.
 - Interfaz English / Español: empieza en el idioma del navegador y se cambia arriba a la derecha.
@@ -120,7 +122,7 @@ a ejecutar `build_app.py` tras actualizar los scripts. La configuración y los p
 ### Línea de comandos (sin interfaz)
     python3 mpc_kit_creator.py -o ~/MPC_Kits -n 20 \
         --pad 1=~/Samples/Kicks --pad 2=~/Samples/Snares --pad 3-4=~/Samples/Hats --mute 3-4=1
-o `python3 mpc_kit_creator.py -c config_example.json`. `--lang en|es` fuerza el idioma y `-h` muestra todas las opciones.
+o `python3 mpc_kit_creator.py -c config_example.json`. `--lang en|es` fuerza el idioma, `--match-key [TONALIDAD]` filtra por tonalidad (sin valor = tonalidad al azar por kit), y `-h` muestra todas las opciones.
 
 ## Cargar los kits en la MPC
 Cada kit es una carpeta con el `.xpm` y sus samples. Copia las carpetas de kits al almacenamiento de tu MPC (o a la

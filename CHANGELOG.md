@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-09-28
+
+### Added
+- **Filter by key**: detects the root note in sample file names (e.g. "Bass_C1", "Synth_Dm",
+  "Lead - F#3") and, when enabled, keeps every kit's tonal samples in the same key — fixed or
+  random per kit. Folders without a detected key (drums, for example) are never filtered.
+  Folder cards show a 🎵 badge with the keys found. The kit name pattern can include "{key}".
+  Also available from the command line with `--match-key`.
+
 ## [1.2.1] - 2026-09-28
 
 ### Fixed

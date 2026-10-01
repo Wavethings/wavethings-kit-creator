@@ -1,19 +1,23 @@
 {
   "output": "~/MPC_Kits",
   "kits": 20,
-  "name": "Trance {n:03d}",
+  "name": "Trance {n:03d} {key}",
   "recursive": true,
   "clear_unassigned": true,
   "hardlink": false,
   "seed": null,
   "pads": {
     "1": "~/Samples/Kicks",
-    "2": ["~/Samples/Snares", "~/Samples/Claps"],
+    "2": [
+      "~/Samples/Snares",
+      "~/Samples/Claps"
+    ],
     "3-4": "~/Samples/ClosedHats",
     "5": "~/Samples/OpenHats",
     "6-8": "~/Samples/Percussion"
   },
   "mute_groups": {
     "3-5": 1
-  }
+  },
+  "match_key": "random"
 }
