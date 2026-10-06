@@ -27,6 +27,8 @@ kits as you want, each with different random samples.
 - **Mute groups (choke)** per folder, e.g. closed + open hi-hat.
 - **Presets**: save and recall your folders, pad assignments, choke groups and colors.
 - **Filter by key**: detects the root note in file names (e.g. "Bass_C1", "Synth_Dm") and keeps every kit in one key, fixed or random per kit; folders without a detected key are unaffected.
+- **Pack / keyword mode**: point at one big, unsorted sample pack and assign pads a keyword group from a dropdown (e.g. "Kick") instead of a whole folder; each pad then only picks samples whose path contains one of that group's synonyms. The groups themselves live in an editable text file, `keyword_groups.txt`, in the app's settings folder — edit it with one click via "✎ Edit keyword groups".
+- **Colors by keyword group**: give a group its own color (the small dot next to its dropdown) so every pad set to it matches, wherever it's assigned, overriding the folder's color just for that pad.
 - **Pad colors** per folder; pads that mix folders show diagonal stripes.
 - Built-in empty template (no `.xpm` needed), or use your own as a base.
 - English / Español interface: starts in your browser's language, switch at the top right.
@@ -38,6 +40,8 @@ kits as you want, each with different random samples.
   folder paths instead of picking them.
 
 ## Quick start
+Needs Python 3.9+ (already on most Macs and Linux machines; on Windows, install it from
+[python.org](https://python.org) and tick "Add to PATH"), nothing else.
 1. Click **Code → Download ZIP** on this page and unzip it (or `git clone` it).
 2. Open a Terminal in that folder and run:
 
@@ -49,8 +53,9 @@ kits as you want, each with different random samples.
 ### Make a double-clickable macOS app
     python3 build_app.py
 Drag the generated `Wavethings Kit Creator.app` to Applications. Closing the browser tab quits the app. Run
-`build_app.py` again after updating the scripts. Settings and presets are kept in
-`~/Library/Application Support/Wavethings Kit Creator/` (Windows: `%APPDATA%`, Linux: `~/.config`); back up `mpc_presets.json` to keep your presets.
+`build_app.py` again after updating the scripts. Settings, presets, `keyword_groups.txt` and `group_colors.json` (see
+Pack mode above) are kept in `~/Library/Application Support/Wavethings Kit Creator/` (Windows: `%APPDATA%`, Linux:
+`~/.config`); back up that folder to keep them.
 
 ### Command line (no interface)
     python3 mpc_kit_creator.py -o ~/MPC_Kits -n 20 \
@@ -68,6 +73,8 @@ computer's MPC library) and load the `.xpm` as a drum program.
 - Audio formats: `.wav`, `.aif`, `.aiff`.
 - Tested with the classic `.xpm` format (File_Version 2.1). Please report your MPC model and software version if
   something does not load.
+- Pack / keyword mode is currently only available from the interface; the command line and config file assign by
+  folder only.
 
 ## Contributing
 Bug reports, ideas and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a new interface
@@ -94,6 +101,8 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 - **Grupos de choque (choke)** por carpeta, p. ej. hi-hat cerrado y abierto.
 - **Presets**: guarda y recupera tus carpetas, asignaciones de pads, grupos de choque y colores.
 - **Filtro por tonalidad**: detecta la nota raíz en los nombres de archivo (p. ej. "Bass_C1", "Synth_Dm") y mantiene cada kit en una sola tonalidad, fija o al azar por kit; las carpetas sin tonalidad detectada no se ven afectadas.
+- **Modo Pack / palabra clave**: señala un pack grande sin ordenar y asigna a cada pad un grupo de palabras clave (p. ej. «Kick») desde un desplegable, en vez de una carpeta entera; ese pad solo usará muestras cuya ruta contenga alguno de los sinónimos del grupo. Los grupos se guardan en un archivo de texto editable, `keyword_groups.txt`, en la carpeta de configuración de la app — se edita con un clic desde «✎ Editar grupos de palabras clave».
+- **Colores por grupo de palabras clave**: dale a un grupo su propio color (el puntito junto a su desplegable) para que todos los pads con ese grupo lo lleven, dondequiera que estén, sustituyendo al color de la carpeta solo en esos pads.
 - **Colores de pad** por carpeta; los pads con varias carpetas se ven con franjas diagonales.
 - Plantilla vacía integrada (no hace falta ningún `.xpm`), o usa la tuya como base.
 - Interfaz English / Español: empieza en el idioma del navegador y se cambia arriba a la derecha.
@@ -116,8 +125,9 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 ### App de macOS con doble clic
     python3 build_app.py
 Arrastra `Wavethings Kit Creator.app` a Aplicaciones. Al cerrar la pestaña del navegador la app se cierra sola. Vuelve
-a ejecutar `build_app.py` tras actualizar los scripts. La configuración y los presets se guardan en
-`~/Library/Application Support/Wavethings Kit Creator/` (Windows: `%APPDATA%`, Linux: `~/.config`); haz copia de `mpc_presets.json` para conservar tus presets.
+a ejecutar `build_app.py` tras actualizar los scripts. La configuración, los presets, `keyword_groups.txt` y
+`group_colors.json` (ver el modo Pack más arriba) se guardan en `~/Library/Application Support/Wavethings Kit
+Creator/` (Windows: `%APPDATA%`, Linux: `~/.config`); haz copia de esa carpeta para conservarlos.
 
 ### Línea de comandos (sin interfaz)
     python3 mpc_kit_creator.py -o ~/MPC_Kits -n 20 \
@@ -135,6 +145,8 @@ biblioteca de MPC de tu ordenador) y carga el `.xpm` como programa de batería.
 - Formatos de audio: `.wav`, `.aif`, `.aiff`.
 - Probado con el formato `.xpm` clásico (File_Version 2.1). Si algo no carga, cuéntanos tu modelo de MPC y versión de
   software.
+- El modo Pack / palabra clave está disponible por ahora solo desde la interfaz; la línea de comandos y el archivo de
+  configuración asignan solo por carpeta.
 
 ## Colaborar
 Se agradecen informes de errores, ideas y *pull requests*. Consulta [CONTRIBUTING.md](CONTRIBUTING.md). Añadir un

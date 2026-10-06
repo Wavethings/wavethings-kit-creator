@@ -233,6 +233,29 @@ class Interface(unittest.TestCase):
         xpm = (tmp / "out" / "K1_C" / "K1_C.xpm").read_text(encoding="utf-8")
         self.assertIn("Bass_C1", sample_names(xpm)["1"])
 
+    def test_generate_through_api_with_pack_keywords(self):
+        tmp = Path(tempfile.mkdtemp())
+        for i in range(3):
+            make_wav(tmp / "Pack" / "Kick" / f"{i}.wav")
+        for i in range(2):
+            make_wav(tmp / "Pack" / "Snare" / f"{i}.wav")
+        st = {"template": "", "output": str(tmp / "out"), "kits": 1, "name": "K", "seed": "1",
+              "recursive": True, "clear": True, "hardlink": False, "lang": "en",
+              "folders": [{"id": "f1", "path": str(tmp / "Pack"), "color": 1, "mute": 0, "pack": True}],
+              "padmap": {"1": [{"id": "f1", "group": "Kick"}], "2": [{"id": "f1", "group": "Snare"}]}}
+        self.assertTrue(self.api("/api/generate", st)["ok"])
+        for _ in range(100):
+            job = self.api("/api/job")
+            if job["done"]:
+                break
+            threading.Event().wait(0.1)
+        self.assertIsNone(job["error"], job)
+        xpm = (tmp / "out" / "K" / "K.xpm").read_text(encoding="utf-8")
+        names = sample_names(xpm)
+        self.assertEqual(set(names), {"1", "2"})
+        for stem in names.values():
+            self.assertTrue((tmp / "out" / "K" / f"{stem}.wav").is_file())
+
 
 class DataFolder(unittest.TestCase):
     def test_env_override_and_user_folder(self):
@@ -381,6 +404,265 @@ class KeyFilteredGeneration(unittest.TestCase):
         xa = (self.tmp / "a" / "K" / "K.xpm").read_text(encoding="utf-8")
         xb = (self.tmp / "b" / "K" / "K.xpm").read_text(encoding="utf-8")
         self.assertEqual(xa, xb)
+
+
+class PackKeywords(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.pack = self.tmp / "Pack"
+        for i in range(4):
+            make_wav(self.pack / "Drums" / "Kick" / f"{i:03d}.wav")     # matches by subfolder name
+        for i in range(3):
+            make_wav(self.pack / "Drums" / "Snare" / f"{i:03d}.wav")
+        for i in range(2):
+            make_wav(self.pack / "Perc" / f"Shaker_{i}.wav")            # matches by file name
+        make_wav(self.pack / "random_loop.wav")                        # matches nothing
+
+    def test_matches_keywords_checks_relative_path_case_insensitively(self):
+        f = self.pack / "Drums" / "Kick" / "000.wav"
+        self.assertTrue(kc.matches_keywords(self.pack, f, ["kick"]))
+        self.assertTrue(kc.matches_keywords(self.pack, f, ["KICK"]))
+        self.assertFalse(kc.matches_keywords(self.pack, f, ["snare"]))
+        self.assertTrue(kc.matches_keywords(self.pack, self.pack / "Perc" / "Shaker_0.wav", ["shaker"]))
+        self.assertFalse(kc.matches_keywords(self.pack, self.pack / "random_loop.wav", ["kick", "bd"]))
+
+    def test_pick_samples_restricts_each_pad_to_its_keywords(self):
+        files = kc.scan_folder(self.pack, True)
+        cache = {self.pack: files}
+        pads = {1: [(self.pack, ["kick"])], 2: [(self.pack, ["snare"])], 8: [(self.pack, ["shaker"])]}
+        for seed in range(50):
+            r = kc.pick_samples(pads, cache, random.Random(seed))
+            self.assertIn("Kick", str(r[1]))
+            self.assertIn("Snare", str(r[2]))
+            self.assertIn("Shaker", str(r[8]))
+
+    def test_pick_samples_falls_back_when_no_keyword_matches(self):
+        files = kc.scan_folder(self.pack, True)
+        cache = {self.pack: files}
+        pads = {1: [(self.pack, ["nonexistent_role_xyz"])]}
+        fb = []
+        for seed in range(30):
+            kc.pick_samples(pads, cache, random.Random(seed), fallback=fb)
+        self.assertEqual(fb, [1] * 30)   # always falls back: nothing ever matches that keyword
+
+    def test_pack_folder_mixed_with_plain_folder_on_one_pad(self):
+        drums = self.pack / "Drums"
+        files = kc.scan_folder(self.pack, True)
+        cache = {self.pack: files, drums: kc.scan_folder(drums, True)}
+        pads = {1: [(self.pack, ["nonexistent_role_xyz"]), drums]}   # no match in pack, but drums covers it
+        fb = []
+        for seed in range(30):
+            kc.pick_samples(pads, cache, random.Random(seed), fallback=fb)
+        self.assertEqual(fb, [])
+
+    def test_generate_kits_with_pack_entries(self):
+        pads = {1: [(self.pack, ["kick"])], 2: [(self.pack, ["snare"])]}
+        logs = []
+        kc.generate_kits(kc.default_template(), self.tmp / "out", 3, "Kit {n}", pads, seed=1, log=logs.append)
+        xpm = (self.tmp / "out" / "Kit 1" / "Kit 1.xpm").read_text(encoding="utf-8")
+        names = sample_names(xpm)
+        self.assertEqual(len(names), 2)
+        self.assertTrue((self.tmp / "out" / "Kit 1" / f"{names['1']}.wav").is_file())
+
+    def test_generate_kits_logs_keyword_fallback_in_both_languages(self):
+        pads = {5: [(self.pack, ["nonexistent_role_xyz"])]}
+        for lang, word in (("en", "pack"), ("es", "pack")):
+            kc.LANG = lang
+            logs = []
+            kc.generate_kits(kc.default_template(), self.tmp / f"out_{lang}", 1, "K", pads,
+                             seed=1, log=logs.append)
+            self.assertTrue(any(word in l for l in logs), logs)
+        kc.LANG = "en"
+
+
+class KeywordGroupsFile(unittest.TestCase):
+    """The plain-text, user-editable keyword-groups file ('Group Name: kw1, kw2, ...')."""
+
+    def test_parses_one_group_per_line(self):
+        g = kc.load_keyword_groups("Kick: kick, bd\nSnare: snare, sd\n")
+        self.assertEqual(g, {"Kick": ["kick", "bd"], "Snare": ["snare", "sd"]})
+        self.assertEqual(list(g), ["Kick", "Snare"])   # dropdown order = file order
+
+    def test_ignores_blank_lines_comments_and_lines_without_a_colon(self):
+        g = kc.load_keyword_groups("\n# a comment\nKick: kick\n\nNot a group\n   \n")
+        self.assertEqual(g, {"Kick": ["kick"]})
+
+    def test_a_group_with_no_keywords_is_dropped(self):
+        self.assertEqual(kc.load_keyword_groups("Empty:\nKick: kick\n"), {"Kick": ["kick"]})
+
+    def test_later_duplicate_name_replaces_the_earlier_one(self):
+        self.assertEqual(kc.load_keyword_groups("Kick: a\nKick: b, c\n"), {"Kick": ["b", "c"]})
+
+    def test_strips_whitespace_around_names_and_keywords(self):
+        self.assertEqual(kc.load_keyword_groups("  Snare  :  snare , snr  \n"), {"Snare": ["snare", "snr"]})
+
+    def test_default_groups_match_the_seven_groups_shipped(self):
+        g = kc.load_keyword_groups(kc.DEFAULT_KEYWORD_GROUPS_TEXT)
+        self.assertEqual(list(g), ["Kick", "Snare", "Clap", "Closed Hihat", "Open Hihat",
+                                   "Percusion", "Melodic"])
+        self.assertIn("kick", g["Kick"])
+        self.assertIn("vibraphone", g["Melodic"])
+
+
+class GuiPackSupport(unittest.TestCase):
+    """Server-side plumbing for pack/keyword mode: the padmap entry shape, preset round-trip,
+    and the keyword-groups file exposed to the interface. The click-to-assign flow and the
+    per-pad dropdown are client-side JavaScript and aren't covered by this Python suite."""
+
+    def test_clean_padmap_entry_normalizes_shapes(self):
+        self.assertEqual(gui.clean_padmap_entry("f1"), "f1")
+        self.assertEqual(gui.clean_padmap_entry({"id": "f1", "group": " Kick "}),
+                         {"id": "f1", "group": "Kick"})
+        self.assertEqual(gui.clean_padmap_entry({"id": "f1", "group": ""}), "f1")   # no group: plain id
+        self.assertEqual(gui.clean_padmap_entry({"id": "f1"}), "f1")
+
+    def test_clean_preset_keeps_pack_flag_and_group(self):
+        preset = {"folders": [{"id": "f1", "path": "/x", "color": 1, "mute": 0, "pack": True}],
+                  "padmap": {"1": [{"id": "f1", "group": "Kick"}], "2": ["f1"]}}
+        cleaned = gui.clean_preset(preset)
+        self.assertTrue(cleaned["folders"][0]["pack"])
+        self.assertEqual(cleaned["padmap"]["1"], [{"id": "f1", "group": "Kick"}])
+        self.assertEqual(cleaned["padmap"]["2"], ["f1"])
+
+    def test_load_groups_creates_the_file_with_the_defaults_on_first_use(self):
+        data_dir = Path(tempfile.mkdtemp())
+        old_file = gui.GROUPS_FILE
+        gui.GROUPS_FILE = data_dir / "keyword_groups.txt"
+        try:
+            self.assertFalse(gui.GROUPS_FILE.exists())
+            groups = gui.load_groups()
+            self.assertTrue(gui.GROUPS_FILE.is_file())
+            self.assertIn("Kick", groups)
+            # editing the file is picked up on the next call, with no caching/restart needed
+            gui.GROUPS_FILE.write_text("Custom: foo, bar\n", encoding="utf-8")
+            self.assertEqual(gui.load_groups(), {"Custom": ["foo", "bar"]})
+        finally:
+            gui.GROUPS_FILE = old_file
+
+
+class GroupColors(unittest.TestCase):
+    """Per-group color overrides: storage file, round-trip, and how run_job resolves them."""
+
+    def setUp(self):
+        self.old_file = gui.GROUP_COLORS_FILE
+        gui.GROUP_COLORS_FILE = Path(tempfile.mkdtemp()) / "group_colors.json"
+
+    def tearDown(self):
+        gui.GROUP_COLORS_FILE = self.old_file
+
+    def test_missing_file_is_an_empty_dict(self):
+        self.assertEqual(gui.load_group_colors(), {})
+
+    def test_store_then_load_round_trips(self):
+        gui.store_group_colors({"Kick": 0x7F0000, "Snare": 0x007F00})
+        self.assertEqual(gui.load_group_colors(), {"Kick": 0x7F0000, "Snare": 0x007F00})
+
+    def test_run_job_prefers_the_groups_color_over_the_folders(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "Pack" / "Kick" / "0.wav")
+        gui.store_group_colors({"Kick": 0x7F0000})
+        st = {"template": "", "output": str(tmp / "out"), "kits": 1, "name": "K", "seed": "1",
+              "recursive": True, "clear": True, "hardlink": False, "lang": "en",
+              "folders": [{"id": "f1", "path": str(tmp / "Pack"), "color": 0x007F00, "mute": 0, "pack": True}],
+              "padmap": {"1": [{"id": "f1", "group": "Kick"}]}}
+        gui.run_job(st)
+        self.assertIsNone(gui.JOB["error"], gui.JOB)
+        xpm = (tmp / "out" / "K" / "K.xpm").read_text(encoding="utf-8")
+        self.assertEqual(gui.kc.read_pad_colors(xpm), [0x7F0000])
+
+    def test_run_job_falls_back_to_the_folders_color_without_an_override(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "Pack" / "Kick" / "0.wav")
+        st = {"template": "", "output": str(tmp / "out"), "kits": 1, "name": "K", "seed": "1",
+              "recursive": True, "clear": True, "hardlink": False, "lang": "en",
+              "folders": [{"id": "f1", "path": str(tmp / "Pack"), "color": 0x007F00, "mute": 0, "pack": True}],
+              "padmap": {"1": [{"id": "f1", "group": "Kick"}]}}
+        gui.run_job(st)
+        xpm = (tmp / "out" / "K" / "K.xpm").read_text(encoding="utf-8")
+        self.assertEqual(gui.kc.read_pad_colors(xpm), [0x007F00])
+
+
+class GroupColorApi(unittest.TestCase):
+    """The /api/group_color and /api/edit_groups endpoints, over real HTTP."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = gui.ThreadingHTTPServer(("127.0.0.1", 0), gui.H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        cls.token = re.search(r'const TOKEN="(\w+)"', urllib.request.urlopen(cls.base + "/").read().decode()).group(1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        self.old_file = gui.GROUP_COLORS_FILE
+        gui.GROUP_COLORS_FILE = Path(tempfile.mkdtemp()) / "group_colors.json"
+
+    def tearDown(self):
+        gui.GROUP_COLORS_FILE = self.old_file
+
+    def api(self, path, body=None):
+        req = urllib.request.Request(self.base + path, data=None if body is None else json.dumps(body).encode(),
+                                     headers={"X-Token": self.token, "Content-Type": "application/json"})
+        return json.load(urllib.request.urlopen(req))
+
+    def test_set_and_clear_a_group_color(self):
+        self.assertEqual(self.api("/api/group_color", {"name": "Kick", "color": 0x7F0000}),
+                         {"groupColors": {"Kick": 0x7F0000}})
+        self.assertEqual(self.api("/api/state")["groupColors"], {"Kick": 0x7F0000})
+        self.assertEqual(self.api("/api/group_color", {"name": "Kick", "color": 0}),
+                         {"groupColors": {}})   # color 0 removes the override entirely
+
+    def test_rejects_a_missing_name(self):
+        self.assertEqual(self.api("/api/group_color", {"name": "", "color": 1}), {"error": "invalid"})
+
+    def test_edit_groups_creates_the_file_and_does_not_crash(self):
+        old = gui.GROUPS_FILE
+        gui.GROUPS_FILE = Path(tempfile.mkdtemp()) / "keyword_groups.txt"
+        try:
+            self.assertEqual(self.api("/api/edit_groups", {}), {"ok": True})
+            self.assertTrue(gui.GROUPS_FILE.is_file())   # created before trying to open it
+        finally:
+            gui.GROUPS_FILE = old
+
+
+class EditorDispatch(unittest.TestCase):
+    """open_in_editor() picks the right command per platform, without actually launching
+    anything (subprocess.run / os.startfile are replaced with recorders)."""
+
+    def test_macos_uses_textedit(self):
+        calls = []
+        old_platform, old_run = gui.sys.platform, gui.subprocess.run
+        gui.sys.platform, gui.subprocess.run = "darwin", lambda cmd, **kw: calls.append(cmd)
+        try:
+            gui.open_in_editor(Path("/tmp/x.txt"))
+            self.assertEqual(calls, [["open", "-a", "TextEdit", "/tmp/x.txt"]])
+        finally:
+            gui.sys.platform, gui.subprocess.run = old_platform, old_run
+
+    def test_linux_uses_xdg_open(self):
+        calls = []
+        old_platform, old_run = gui.sys.platform, gui.subprocess.run
+        gui.sys.platform, gui.subprocess.run = "linux", lambda cmd, **kw: calls.append(cmd)
+        try:
+            gui.open_in_editor(Path("/tmp/x.txt"))
+            self.assertEqual(calls, [["xdg-open", "/tmp/x.txt"]])
+        finally:
+            gui.sys.platform, gui.subprocess.run = old_platform, old_run
+
+    def test_windows_uses_startfile(self):
+        calls = []
+        old_platform = gui.sys.platform
+        gui.sys.platform = "win32"
+        gui.os.startfile = lambda p: calls.append(p)   # only exists on real Windows
+        try:
+            gui.open_in_editor(Path(r"C:\x.txt"))
+            self.assertEqual(calls, [r"C:\x.txt"])
+        finally:
+            gui.sys.platform = old_platform
+            del gui.os.startfile
 
 
 class CommandLine(unittest.TestCase):
