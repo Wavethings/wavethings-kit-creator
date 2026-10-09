@@ -20,7 +20,7 @@ import argparse, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.8.0"
+__version__ = "1.9.1"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -147,11 +147,15 @@ MSG = {
         "h_lang": "interface language (default: system language)",
         "h_key": "filter by key: KEY for a fixed key (e.g. C#m), or no value for a random key "
                  "per kit; only affects folders where a key was detected in file names",
+        "h_padnum": "prefix every output sample name with its pad number, so the kit folder "
+                    "also works with samplers that import files in alphabetical order with no "
+                    ".xpm support of their own (Maschine, Battery, several hardware samplers)",
         "err_key": "Unrecognized key: {key} (examples: C, F#, Dbm, Gmin)",
         "key_none": "  ! --match-key was used but no key was detected in any file name: ignored",
         "kit_key": "[{name}] {n} pads assigned · key {key}",
-        "key_fallback": "  (no {key} sample for pad(s) {pads}: used unfiltered)",
-        "kw_fallback": "  (no match for the keywords on pad(s) {pads}: used the whole pack)",
+        "key_fallback": "  (no {key} sample for pad(s) {pads}: used another key)",
+        "kw_unmatched": "  ! no sample matches the keyword group on pad(s) {pads}: left empty",
+        "group_missing": "  ! pad {pad}: keyword group \"{group}\" is not in keyword_groups.txt: skipped",
     },
     "es": {
         "no_folder": "No existe la carpeta: {folder}",
@@ -181,11 +185,15 @@ MSG = {
         "h_key": "filtrar por tonalidad: TONALIDAD para una fija (p. ej. C#m), o sin valor para "
                  "una tonalidad al azar por kit; solo afecta a carpetas con tonalidad detectada "
                  "en los nombres de archivo",
+        "h_padnum": "añade el número de pad delante de cada muestra de salida, para que la carpeta "
+                    "del kit también funcione con samplers que importan archivos en orden "
+                    "alfabético y no leen .xpm (Maschine, Battery, varios samplers hardware)",
         "err_key": "Tonalidad no reconocida: {key} (ejemplos: C, F#, Dbm, Gmin)",
         "key_none": "  ! se usó --match-key pero no se detectó tonalidad en ningún archivo: se ignora",
         "kit_key": "[{name}] {n} pads asignados · tonalidad {key}",
-        "key_fallback": "  (sin muestra en {key} para el/los pad(s) {pads}: se usó sin filtrar)",
-        "kw_fallback": "  (sin coincidencia de palabras clave en el/los pad(s) {pads}: se usó el pack completo)",
+        "key_fallback": "  (sin muestra en {key} para el/los pad(s) {pads}: se usó otra tonalidad)",
+        "kw_unmatched": "  ! ninguna muestra coincide con el grupo de palabras clave en el/los pad(s) {pads}: se deja vacío",
+        "group_missing": "  ! pad {pad}: el grupo de palabras clave \"{group}\" no está en keyword_groups.txt: se omite",
     },
 }
 
@@ -247,15 +255,44 @@ def scan_folder(folder, recursive=True):
     )
 
 
+def _word_tokens(text):
+    """Lowercase word tokens of a path, splitting on separators, camelCase and letter/digit
+    boundaries: "Drums/HiHat_Closed01.wav" -> ["drums", "hi", "hat", "closed", "01", "wav"]."""
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    return [t.lower() for t in re.findall(r"[A-Za-z]+|\d+", text)]
+
+
+def _keyword_hit(keyword, rel, tokens):
+    """One keyword against one relative path. Keywords of 3+ characters match anywhere in the
+    path (case-insensitive), so "kick" finds "Kicks/", "kick_01" and "BigKick". Shorter ones
+    ("sd", "cp", "bd", "hh") are too easy to find inside unrelated words ("Subdued" contains
+    "bd"), so they only match as a whole word, with an optional plural "s"."""
+    k = keyword.strip().lower()
+    if not k:
+        return False
+    kt = _word_tokens(keyword)
+    if len(k.replace(" ", "")) >= 3:
+        if k in rel:
+            return True
+    if not kt:
+        return False
+    n = len(kt)
+    for i in range(len(tokens) - n + 1):
+        if all(tokens[i + j] == kt[j] or tokens[i + j] == kt[j] + "s" for j in range(n)):
+            return True
+    return False
+
+
 def matches_keywords(folder, file, keywords):
-    """True if any keyword is a case-insensitive substring of the sample's path relative to
-    `folder` (so a keyword can match a subfolder name like "Kick" as well as the file name
-    itself, which is how most sample packs are actually organized)."""
+    """True if any keyword matches the sample's path relative to `folder` (so a keyword can
+    match a subfolder name like "Kick" as well as the file name itself, which is how most
+    sample packs are actually organized). See _keyword_hit for how each keyword is matched."""
     try:
-        rel = file.relative_to(folder).as_posix().lower()
+        rel_raw = file.relative_to(folder).as_posix()
     except ValueError:
-        rel = file.name.lower()
-    return any(k.strip().lower() in rel for k in keywords if k.strip())
+        rel_raw = file.name
+    rel, tokens = rel_raw.lower(), _word_tokens(rel_raw)
+    return any(_keyword_hit(k, rel, tokens) for k in keywords)
 
 
 def _pad_sources(entries):
@@ -273,25 +310,28 @@ def _pad_sources(entries):
     return srcs, kw_for
 
 
-def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_folders=None, fallback=None):
+def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_folders=None,
+                 fallback=None, unmatched=None):
     """Pick one sample per pad. With several folders on a pad, a folder is chosen first
     (equal probability for each, regardless of how many samples it has) and then a sample.
     Avoids repeating a sample within the kit while free ones remain.
 
     Each entry in pads[pad] is either a folder Path (ordinary folder, no filter) or a
-    (Path, keywords) tuple restricting that pad to samples whose relative path contains any of
-    `keywords` within that one folder (see matches_keywords) — this is how pack/keyword mode
-    narrows one big, unsorted folder down to a single pad's role (e.g. "kick").
+    (Path, keywords) tuple restricting that pad to samples matching any of `keywords` within
+    that one folder (see matches_keywords) — this is how pack/keyword mode narrows one big,
+    unsorted folder down to a single pad's role (e.g. "kick").
 
-    target_key/folder_keys/tonal_folders (all optional) additionally restrict the choice to
-    samples whose file name matches target_key, but only within folders present in
-    tonal_folders (folders that have at least one sample with a detected key); other folders
-    are never restricted by key. Key and keyword filters combine (both must match) when both
-    apply to the same folder.
+    A keyword group that matches nothing leaves the pad EMPTY (its number is appended to
+    `unmatched` if that's a list) rather than filling it with an unrelated sample: a pad set
+    to "Snare" must never end up with a chord.
 
-    If a pad's assigned folders have no sample at all passing the filter(s) in play, the
-    restriction is lifted for that pad (it is picked normally) and, if `fallback` is a list,
-    its pad number is appended so the caller can report it."""
+    target_key/folder_keys/tonal_folders (all optional) add the key filter. For an ordinary
+    folder it keeps only samples in target_key, if the folder has any sample with a detected
+    key (tonal_folders). For a keyword-filtered pack it applies per pad instead: only if the
+    samples matching that pad's keywords include some with a detected key (a melodic pad) are
+    they limited to target_key, so the drum pads of a pack, which carry no key, are never
+    emptied by it. If a pad can't be satisfied in target_key, another key is used (and its
+    number is appended to `fallback`) rather than leaving it empty."""
     key_filtering = bool(target_key and tonal_folders)
     used, chosen = set(), {}
     for pad in sorted(pads):
@@ -300,16 +340,36 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
         if not srcs:
             continue
 
-        def base_pool(x):
-            pool = folder_keys[x].get(target_key, []) if key_filtering and x in tonal_folders else cache[x]
+        pools, relaxed = {}, False
+        for x in srcs:
             kw = kw_for.get(x)
-            return [f for f in pool if matches_keywords(x, f, kw)] if kw else pool
+            if kw:
+                pool = [f for f in cache[x] if matches_keywords(x, f, kw)]
+                if key_filtering and x in tonal_folders:
+                    keyed = [f for f in pool if parse_key(f.name)]
+                    if keyed:                                   # a melodic pad: apply the key
+                        in_key = [f for f in keyed if parse_key(f.name) == target_key]
+                        if in_key:
+                            pool = in_key
+                        else:
+                            relaxed = True                      # another key beats an empty pad
+            elif key_filtering and x in tonal_folders:
+                pool = folder_keys[x].get(target_key, [])
+            else:
+                pool = cache[x]
+            pools[x] = pool
 
-        pools = {x: base_pool(x) for x in srcs}
-        if (key_filtering or any(kw_for.values())) and not any(pools.values()):
-            if fallback is not None:               # no match anywhere for this pad: lift every filter
+        if not any(pools.values()):
+            if any(kw_for.get(x) for x in srcs):
+                if unmatched is not None:
+                    unmatched.append(pad)
+                continue                                        # explicit keywords found nothing
+            if fallback is not None:                            # key filter only: use any key
                 fallback.append(pad)
             pools = {x: cache[x] for x in srcs}
+        elif relaxed and fallback is not None:
+            fallback.append(pad)
+
         free = {x: [f for f in pools[x] if f not in used] for x in srcs}
         avail = [x for x in srcs if free[x]]
         if avail:
@@ -323,15 +383,22 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
     return chosen
 
 
-def unique_stems(chosen):
-    """Unique sample name (without extension) within the kit."""
+def unique_stems(chosen, pad_prefix=False):
+    """Unique sample name (without extension) within the kit. With pad_prefix, every name
+    starts with its pad number zero-padded to 3 digits (e.g. "001_Kick"), so that sorting the
+    kit folder by file name also sorts it by pad. That's what lets a sampler with no .xpm
+    support of its own (Maschine, Battery, many hardware samplers) import the kit anyway: select
+    a bank's 16 files in Finder/Explorer (they're already in the right order) and drop them
+    together onto the sampler's first pad, which typically auto-assigns one file per pad in the
+    order they were selected. chosen is iterated in pad order (guaranteed by pick_samples)."""
     file_to_stem, taken = {}, set()
-    for f in chosen.values():
+    for pad, f in chosen.items():
         if f in file_to_stem:
             continue
-        cand, i = f.stem, 2
+        base = f"{pad:03d}_{f.stem}" if pad_prefix else f.stem
+        cand, i = base, 2
         while cand.lower() in taken:
-            cand = f"{f.stem}_{i}"
+            cand = f"{base}_{i}"
             i += 1
         taken.add(cand.lower())
         file_to_stem[f] = cand
@@ -511,7 +578,7 @@ SqUqo1SsMkrlKqNUsDJKdbLTUWGqk50MC5NpYTIuTOaFycAwmRgmI8NUZlikQsOiTKbgqU52KjcsUsFh
 
 def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear_others=True,
                   recursive=True, hardlink=False, seed=None, log=print, mutegroups=None,
-                  match_key=None):
+                  match_key=None, pad_numbering=False):
     """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched).
 
     match_key: None/False disables key filtering. True or "random" picks a different key for
@@ -519,20 +586,30 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
     "C#m", typically from normalize_key_input) fixes that key for every kit. Only folders with
     at least one sample whose file name carries a detected key are restricted by the filter;
     others (e.g. drums) are unaffected. name_pat may use "{key}" to include the kit's key.
+    pad_numbering: prefixes every output sample name with its pad number (see unique_stems) so
+    the kit folder also works with samplers that have no .xpm support of their own and just
+    import a selection of files in alphabetical order (Maschine, Battery, several hardware
+    samplers) — drag a bank's 16 files together onto the sampler's first pad.
     An entry of pads[pad] may be a (Path, keywords) tuple instead of a plain Path to restrict
     that one pad to samples matching any of those keywords within that folder; see
     pick_samples and matches_keywords."""
-    all_folders, any_keywords = set(), False
+    all_folders, any_keywords, keyword_folders = set(), False, set()
     for entries in pads.values():
         srcs, kw_for = _pad_sources(entries)
         all_folders.update(srcs)
         any_keywords = any_keywords or any(kw_for.values())
+        keyword_folders.update(x for x, kw in kw_for.items() if kw)
 
     cache = {}
     for folder in all_folders:
         if not folder.is_dir():
             raise FileNotFoundError(msg("no_folder", folder=folder))
-        cache[folder] = scan_folder(folder, recursive)
+        # A folder used with a keyword filter on any pad is always scanned recursively,
+        # regardless of the "include subfolders" setting: keyword matching is specifically
+        # meant to find samples by their subfolder name (see matches_keywords), and a pack
+        # scanned non-recursively would see none of its organized content, find no matches,
+        # and silently fall back to picking from whatever loose files sit at its top level.
+        cache[folder] = scan_folder(folder, True if folder in keyword_folders else recursive)
         log(msg("scan", folder=folder, n=len(cache[folder])))
         if not cache[folder]:
             log(msg("empty"))
@@ -565,8 +642,10 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
             n += 1
             name = name_pat.format(n=n, key=target_key or "")
         fallback_pads = [] if (target_key or any_keywords) else None
-        chosen = pick_samples(pads, cache, rng, target_key, folder_keys, tonal_folders, fallback_pads)
-        stems = unique_stems(chosen)
+        unmatched_pads = [] if any_keywords else None
+        chosen = pick_samples(pads, cache, rng, target_key, folder_keys, tonal_folders,
+                              fallback_pads, unmatched_pads)
+        stems = unique_stems(chosen, pad_numbering)
         kit_dir = out_root / name
         kit_dir.mkdir()
 
@@ -589,10 +668,11 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
             log(msg("kit_key", name=name, n=len(assignment), key=target_key))
         else:
             log(msg("kit", name=name, n=len(assignment)))
-        if fallback_pads:
-            pads_txt = ", ".join(str(p) for p in sorted(set(fallback_pads)))
-            log(msg("key_fallback", key=target_key, pads=pads_txt) if target_key
-               else msg("kw_fallback", pads=pads_txt))
+        if fallback_pads and target_key:
+            log(msg("key_fallback", key=target_key,
+                    pads=", ".join(str(p) for p in sorted(set(fallback_pads)))))
+        if unmatched_pads:
+            log(msg("kw_unmatched", pads=", ".join(str(p) for p in sorted(set(unmatched_pads)))))
     log(msg("done", n=n_kits, out=out_root))
 
 
@@ -617,6 +697,7 @@ def main():
     ap.add_argument("--hardlink", action="store_true", help=msg("h_link"))
     ap.add_argument("--seed", type=int, help=msg("h_seed"))
     ap.add_argument("--match-key", nargs="?", const="random", default=None, metavar="KEY", help=msg("h_key"))
+    ap.add_argument("--pad-numbering", action="store_true", help=msg("h_padnum"))
     ap.add_argument("--lang", choices=["en", "es"], help=msg("h_lang"))
     a = ap.parse_args()
 
@@ -638,6 +719,7 @@ def main():
         if not normalized:
             ap.error(msg("err_key", key=match_key))
         match_key = normalized
+    pad_numbering = a.pad_numbering or cfg.get("pad_numbering", False)
 
     pads = {}
     for spec, folders in cfg.get("pads", {}).items():
@@ -685,7 +767,8 @@ def main():
     try:
         generate_kits(template, output, n_kits, name_pat, pads, clear_others=clear_others,
                       recursive=recursive, hardlink=hardlink, seed=seed,
-                      mutegroups=mutegroups or None, match_key=match_key)
+                      mutegroups=mutegroups or None, match_key=match_key,
+                      pad_numbering=pad_numbering)
     except FileNotFoundError as e:
         sys.exit(str(e))
 

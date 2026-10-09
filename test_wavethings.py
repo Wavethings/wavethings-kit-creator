@@ -123,11 +123,47 @@ class Generation(unittest.TestCase):
             kc.generate_kits(kc.default_template(), self.tmp / "o", 1, "K", {1: [self.tmp / "nope"]}, log=lambda x: None)
 
 
+class PadNumbering(unittest.TestCase):
+    """Prefixing output samples with their pad number, so a kit folder also works with samplers
+    that import a selection of files in alphabetical order (Maschine, Battery...)."""
+
+    def test_unique_stems_prefixes_with_zero_padded_pad_number(self):
+        chosen = {1: Path("/A/Kick.wav"), 12: Path("/B/Snare.wav"), 100: Path("/C/Hat.wav")}
+        stems = kc.unique_stems(chosen, pad_prefix=True)
+        self.assertEqual([stems[chosen[p]] for p in (1, 12, 100)], ["001_Kick", "012_Snare", "100_Hat"])
+
+    def test_names_sort_in_pad_order(self):
+        chosen = {p: Path(f"/x/{n}.wav") for p, n in ((2, "Zebra"), (10, "Apple"), (1, "Mango"))}
+        stems = sorted(kc.unique_stems(chosen, pad_prefix=True).values())
+        self.assertEqual(stems, ["001_Mango", "002_Zebra", "010_Apple"])   # pad order, not alphabetical
+
+    def test_without_the_option_names_are_unchanged(self):
+        chosen = {1: Path("/A/Kick.wav")}
+        self.assertEqual(kc.unique_stems(chosen), {Path("/A/Kick.wav"): "Kick"})
+
+    def test_same_file_on_two_pads_keeps_a_single_copy(self):
+        f = Path("/A/Kick.wav")
+        stems = kc.unique_stems({1: f, 5: f}, pad_prefix=True)
+        self.assertEqual(len(stems), 1)
+
+    def test_generate_kits_files_and_xpm_agree(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "Kicks" / "Deep.wav")
+        make_wav(tmp / "Snares" / "Snap.wav")
+        kc.generate_kits(kc.default_template(), tmp / "out", 1, "Kit",
+                         {1: [tmp / "Kicks"], 5: [tmp / "Snares"]}, seed=1, log=lambda x: None,
+                         pad_numbering=True)
+        kit = tmp / "out" / "Kit"
+        self.assertEqual(sorted(p.name for p in kit.glob("*.wav")), ["001_Deep.wav", "005_Snap.wav"])
+        names = sample_names((kit / "Kit.xpm").read_text(encoding="utf-8"))
+        self.assertEqual(names, {"1": "001_Deep", "5": "005_Snap"})   # the .xpm still points at real files
+
+
 class Languages(unittest.TestCase):
     def test_engine_messages_match_between_languages(self):
         self.assertEqual(set(kc.MSG["en"]), set(kc.MSG["es"]))
         for k in kc.MSG["en"]:
-            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2")
+            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g")
             if k != "h_name":
                 kc.MSG["en"][k].format(**kw)
                 kc.MSG["es"][k].format(**kw)
@@ -232,6 +268,52 @@ class Interface(unittest.TestCase):
         self.assertIsNone(job["error"], job)
         xpm = (tmp / "out" / "K1_C" / "K1_C.xpm").read_text(encoding="utf-8")
         self.assertIn("Bass_C1", sample_names(xpm)["1"])
+
+    def test_generate_through_api_with_pad_numbering(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "Kicks" / "k.wav")
+        st = {"template": "", "output": str(tmp / "out"), "kits": 1, "name": "K", "seed": "1",
+              "recursive": True, "clear": True, "hardlink": False, "lang": "en", "padNumbering": True,
+              "folders": [{"id": "f1", "path": str(tmp / "Kicks"), "color": 1, "mute": 0}],
+              "padmap": {"7": ["f1"]}}
+        self.assertTrue(self.api("/api/generate", st)["ok"])
+        for _ in range(100):
+            job = self.api("/api/job")
+            if job["done"]:
+                break
+            threading.Event().wait(0.1)
+        self.assertIsNone(job["error"], job)
+        self.assertTrue((tmp / "out" / "K" / "007_k.wav").is_file())
+
+    def test_unknown_group_is_skipped_with_a_warning_not_the_whole_pack(self):
+        tmp = Path(tempfile.mkdtemp())
+        for i in range(3):
+            make_wav(tmp / "Pack" / "Keys" / f"EP Chord {i}.wav")
+        st = {"template": "", "output": str(tmp / "out"), "kits": 1, "name": "K", "seed": "1",
+              "recursive": True, "clear": True, "hardlink": False, "lang": "en",
+              "folders": [{"id": "f1", "path": str(tmp / "Pack"), "color": 1, "mute": 0, "pack": True}],
+              "padmap": {"1": [{"id": "f1", "group": "Snarez"}],     # a name that isn't in the file
+                         "2": ["f1"]}}                               # deliberately the whole pack
+        self.api("/api/generate", st)
+        for _ in range(100):
+            job = self.api("/api/job")
+            if job["done"]:
+                break
+            threading.Event().wait(0.1)
+        self.assertTrue(any("Snarez" in l and "keyword_groups.txt" in l for l in job["log"]), job["log"])
+        names = sample_names((tmp / "out" / "K" / "K.xpm").read_text(encoding="utf-8"))
+        self.assertEqual(set(names), {"2"})     # pad 1 stays empty instead of getting a random sample
+
+    def test_scan_reports_how_many_samples_each_group_matches(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "Pack" / "Drums" / "Snare" / "a.wav")
+        make_wav(tmp / "Pack" / "Drums" / "Snare" / "b.wav")
+        make_wav(tmp / "Pack" / "Keys" / "EP Chord 1.wav")
+        r = self.api("/api/scan", {"path": str(tmp / "Pack"), "recursive": False, "pack": True})
+        self.assertEqual(r["count"], 3)                      # a pack is scanned in depth regardless
+        self.assertEqual(r["groupCounts"]["Snare"], 2)
+        self.assertEqual(r["groupCounts"]["Kick"], 0)        # nothing matches: the interface flags it
+        self.assertEqual(self.api("/api/scan", {"path": str(tmp / "Pack"), "recursive": True})["groupCounts"], {})
 
     def test_generate_through_api_with_pack_keywords(self):
         tmp = Path(tempfile.mkdtemp())
@@ -436,14 +518,53 @@ class PackKeywords(unittest.TestCase):
             self.assertIn("Snare", str(r[2]))
             self.assertIn("Shaker", str(r[8]))
 
-    def test_pick_samples_falls_back_when_no_keyword_matches(self):
+    def test_pick_samples_leaves_the_pad_empty_when_no_keyword_matches(self):
+        # A pad set to "Snare" must never end up with an unrelated sample (a chord, say):
+        # when its group matches nothing the pad stays empty and is reported.
         files = kc.scan_folder(self.pack, True)
         cache = {self.pack: files}
-        pads = {1: [(self.pack, ["nonexistent_role_xyz"])]}
-        fb = []
+        pads = {1: [(self.pack, ["nonexistent_role_xyz"])], 2: [(self.pack, ["snare"])]}
         for seed in range(30):
-            kc.pick_samples(pads, cache, random.Random(seed), fallback=fb)
-        self.assertEqual(fb, [1] * 30)   # always falls back: nothing ever matches that keyword
+            um = []
+            r = kc.pick_samples(pads, cache, random.Random(seed), unmatched=um)
+            self.assertNotIn(1, r)
+            self.assertEqual(um, [1])
+            self.assertIn("Snare", str(r[2]))
+
+    def test_short_keywords_only_match_whole_words(self):
+        pack = self.tmp / "Pack3"
+        make_wav(pack / "Subdued Texture.wav")        # "bd" appears inside "Subdued"
+        make_wav(pack / "BD_Punch.wav")               # "BD" as a word
+        make_wav(pack / "Snare_SD_01.wav")
+        self.assertFalse(kc.matches_keywords(pack, pack / "Subdued Texture.wav", ["bd"]))
+        self.assertTrue(kc.matches_keywords(pack, pack / "BD_Punch.wav", ["bd"]))
+        self.assertTrue(kc.matches_keywords(pack, pack / "Snare_SD_01.wav", ["sd"]))
+        self.assertTrue(kc.matches_keywords(pack, pack / "BD_Punch.wav", ["BD"]))   # case-insensitive
+
+    def test_keywords_match_across_separators_camelcase_and_plurals(self):
+        pack = self.tmp / "Pack4"
+        for n in ("Bass_Drum_01.wav", "HiHatClosed.wav", "Toms/Tom1.wav", "Kicks/x.wav"):
+            make_wav(pack / n)
+        self.assertTrue(kc.matches_keywords(pack, pack / "Bass_Drum_01.wav", ["bass drum"]))
+        self.assertTrue(kc.matches_keywords(pack, pack / "HiHatClosed.wav", ["hat"]))
+        self.assertTrue(kc.matches_keywords(pack, pack / "Toms" / "Tom1.wav", ["tom"]))
+        self.assertTrue(kc.matches_keywords(pack, pack / "Kicks" / "x.wav", ["kick"]))
+
+    def test_key_filter_never_empties_the_drum_pads_of_a_tonal_pack(self):
+        pack = self.tmp / "Pack5"
+        for n in ("Lead_C.wav", "Lead_D.wav"):
+            make_wav(pack / "Synth" / n)
+        for i in range(3):
+            make_wav(pack / "Drums" / f"Snare {i}.wav")
+        files = kc.scan_folder(pack, True)
+        cache, keys, tonal = {pack: files}, {pack: kc.index_by_key(files)}, {pack}
+        pads = {1: [(pack, ["snare"])], 2: [(pack, ["lead"])]}
+        for seed in range(100):
+            um = []
+            r = kc.pick_samples(pads, cache, random.Random(seed), "C", keys, tonal, [], um)
+            self.assertIn("Snare", str(r[1]))      # keyless drums are not touched by the key
+            self.assertIn("Lead_C", str(r[2]))     # the melodic pad is held to the key
+            self.assertEqual(um, [])
 
     def test_pack_folder_mixed_with_plain_folder_on_one_pad(self):
         drums = self.pack / "Drums"
@@ -464,14 +585,46 @@ class PackKeywords(unittest.TestCase):
         self.assertEqual(len(names), 2)
         self.assertTrue((self.tmp / "out" / "Kit 1" / f"{names['1']}.wav").is_file())
 
-    def test_generate_kits_logs_keyword_fallback_in_both_languages(self):
+    def test_keyword_filtered_folders_are_always_scanned_recursively(self):
+        # Regression test: a pack with loose files at its top level (very common in real packs:
+        # readme-adjacent demos, bonus one-shots) used to silently ignore its organized
+        # subfolders and pick from those loose files instead when "include subfolders" was off,
+        # because the keyword match found nothing at the (non-recursive) top level and the
+        # fallback-when-no-match safety net kicked in. A folder used with a keyword filter must
+        # always be scanned recursively, regardless of the global `recursive` setting.
+        # (Uses its own folder, with descriptive file names, so the renamed output still shows
+        # which one was picked; self.pack's "000.wav" names don't carry that once copied.)
+        pack2 = self.tmp / "Pack2"
+        for i in range(3):
+            make_wav(pack2 / "Drums" / "Kick" / f"kick_{i}.wav")
+            make_wav(pack2 / "Drums" / "Snare" / f"snare_{i}.wav")
+        make_wav(pack2 / "Bonus_FX.wav")            # a loose top-level file, unrelated to any group
+
+        pads = {1: [(pack2, ["kick"])], 2: [(pack2, ["snare"])]}
+        for seed in range(30):
+            r = kc.pick_samples(pads, {pack2: kc.scan_folder(pack2, True)}, random.Random(seed))
+            self.assertIn("Kick", str(r[1]))
+            self.assertIn("Snare", str(r[2]))
+
+        logs = []
+        kc.generate_kits(kc.default_template(), self.tmp / "out_norec", 10, "K{n}", pads,
+                         seed=1, log=logs.append, recursive=False)   # global flag OFF
+        for n in range(1, 11):
+            xpm = (self.tmp / "out_norec" / f"K{n}" / f"K{n}.xpm").read_text(encoding="utf-8")
+            names = sample_names(xpm)
+            self.assertIn("kick", names["1"].lower(), names)
+            self.assertIn("snare", names["2"].lower(), names)
+
+    def test_generate_kits_warns_about_unmatched_pads_in_both_languages(self):
         pads = {5: [(self.pack, ["nonexistent_role_xyz"])]}
-        for lang, word in (("en", "pack"), ("es", "pack")):
+        for lang, word in (("en", "left empty"), ("es", "se deja vacío")):
             kc.LANG = lang
             logs = []
             kc.generate_kits(kc.default_template(), self.tmp / f"out_{lang}", 1, "K", pads,
                              seed=1, log=logs.append)
             self.assertTrue(any(word in l for l in logs), logs)
+            names = sample_names((self.tmp / f"out_{lang}" / "K" / "K.xpm").read_text(encoding="utf-8"))
+            self.assertEqual(names, {})                 # nothing was put on that pad
         kc.LANG = "en"
 
 
@@ -696,6 +849,13 @@ class CommandLine(unittest.TestCase):
         make_wav(tmp / "Bass" / "Bass_C1.wav")
         r = self.run_cli("-o", str(tmp / "o"), "--pad", f"1={tmp / 'Bass'}", "--match-key")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_cli_pad_numbering_flag(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "K" / "a.wav")
+        r = self.run_cli("-o", str(tmp / "o"), "--pad", f"3={tmp / 'K'}", "--pad-numbering")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((tmp / "o" / "Kit 001" / "003_a.wav").is_file())
 
     def test_cli_rejects_unrecognized_key(self):
         tmp = Path(tempfile.mkdtemp())

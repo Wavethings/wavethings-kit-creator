@@ -214,6 +214,9 @@ def run_job(st):
                 path = Path(f["path"]).expanduser()
                 group = e.get("group") if isinstance(e, dict) else None
                 kw = groups.get(group) if group else None
+                if group and not kw:        # never fall back to "the whole pack" for a typo/rename
+                    log(kc.msg("group_missing", pad=pad, group=group))
+                    continue
                 items.append((path, kw) if kw else path)
                 used_folders.append(f)
                 used_groups.append(group)
@@ -230,7 +233,7 @@ def run_job(st):
         kc.generate_kits(template, st["output"], int(st["kits"]), st["name"] or "Kit {n:03d}", pads,
                          colors=colors, clear_others=bool(st["clear"]), recursive=bool(st["recursive"]),
                          hardlink=bool(st["hardlink"]), seed=seed, log=log, mutegroups=mutes,
-                         match_key=match_key)
+                         match_key=match_key, pad_numbering=bool(st.get("padNumbering")))
     except Exception as e:  # show any error in the interface
         JOB["error"] = f"{type(e).__name__}: {e}"
     JOB["done"] = True
@@ -336,9 +339,14 @@ class H(BaseHTTPRequestHandler):
             return self.send({"paths": subs})
         if self.path == "/api/scan":
             d = Path(data["path"]).expanduser()
-            files = kc.scan_folder(d, data.get("recursive", True)) if d.is_dir() else []
+            files = kc.scan_folder(d, True if data.get("pack") else data.get("recursive", True)) if d.is_dir() else []
             keys = {k: len(v) for k, v in kc.index_by_key(files).items()} if files else {}
-            return self.send({"count": len(files) if d.is_dir() else -1, "keys": keys})
+            counts = {}
+            if data.get("pack") and files:     # how many samples each keyword group would find
+                counts = {name: sum(1 for f in files if kc.matches_keywords(d, f, kws))
+                          for name, kws in load_groups().items()}
+            return self.send({"count": len(files) if d.is_dir() else -1, "keys": keys,
+                              "groupCounts": counts})
         if self.path == "/api/import_colors":
             try:
                 vals = kc.read_pad_colors(Path(data["path"]).expanduser().read_text(encoding="utf-8"))
@@ -431,6 +439,8 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
   <label class="chk"><input type="checkbox" id="matchKeyOn"><span data-i18n="chk_matchkey"></span></label>
   <div class="row" id="matchKeyRow" style="display:none;margin:0 0 8px"><label data-i18n="lbl_matchkey"></label><select class="big" id="matchKeySel" style="flex:1"></select></div>
   <div class="hint" id="matchKeyHint" data-i18n="hint_matchkey"></div>
+  <label class="chk"><input type="checkbox" id="padNumbering"><span data-i18n="chk_padnum"></span></label>
+  <div class="hint" data-i18n="hint_padnum"></div>
   <div class="row" style="margin-top:12px"><button class="pri" id="go" onclick="generate()" data-i18n="btn_go"></button><span id="msg"></span></div>
   <pre id="log" style="display:none"></pre>
  </section>
@@ -466,6 +476,8 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
  lbl_folder:"Folder",btn_choose:"Choose…",lbl_kits:"No. of kits",lbl_name:"Name",lbl_seed:"Seed",ph_seed:"(optional) same seed = same kits",
  chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_hardlink:"Link samples instead of copying (saves space)",
+ chk_padnum:"Number samples by pad (for Maschine and others)",
+ hint_padnum:"Prefixes every output sample with its pad number (e.g. \"001_Kick.wav\"), so sorting the kit folder by name also sorts it by pad. Lets samplers with no .xpm support of their own import the kit too: select a bank's 16 files together in Finder/Explorer (already in order) and drop them onto the sampler's first pad — Maschine, Battery and most hardware samplers auto-assign one file per pad from there.",
  chk_matchkey:"Filter by key",lbl_matchkey:"Key",key_random:"Random per kit",
  hint_matchkey:"Reads the root note from file names (e.g. \"Bass_C1\", \"Synth_Dm\", \"Lead - F#3\") and, when a folder has that information, keeps every kit's samples in one key. Folders without a detected key (drums, for example) are never filtered. Detection is best-effort and may miss or misread some names; add {key} to the name pattern above to show each kit's key. Filterable folders show a 🎵 badge.",
  hint_matchkey_off:"No folder has a detected key yet — add \"C1\", \"Dm\", \"F#\" and the like to your file names to use this filter.",
@@ -500,6 +512,8 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
  lbl_folder:"Carpeta",btn_choose:"Elegir…",lbl_kits:"Nº de kits",lbl_name:"Nombre",lbl_seed:"Semilla",ph_seed:"(opcional) misma semilla = mismos kits",
  chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_hardlink:"Enlazar samples en vez de copiar (ahorra espacio)",
+ chk_padnum:"Numerar samples por pad (para Maschine y otros)",
+ hint_padnum:"Añade el número de pad delante de cada muestra de salida (p. ej. \"001_Kick.wav\"), para que ordenar la carpeta del kit por nombre también la ordene por pad. Así, un sampler sin soporte propio de .xpm puede importar el kit igualmente: selecciona juntos los 16 archivos de un banco en el Finder/Explorador (ya están en orden) y suéltalos sobre el primer pad del sampler — Maschine, Battery y la mayoría de samplers hardware asignan uno por pad a partir de ahí.",
  chk_matchkey:"Filtrar por tonalidad",lbl_matchkey:"Tonalidad",key_random:"Aleatoria por kit",
  hint_matchkey:"Lee la nota raíz en el nombre del archivo (p. ej. \"Bass_C1\", \"Synth_Dm\", \"Lead - F#3\") y, cuando una carpeta tiene esa información, usa siempre la misma tonalidad dentro de cada kit. Las carpetas sin tonalidad detectada (batería, por ejemplo) nunca se filtran. La detección es aproximada y puede fallar con algunos nombres; añade {key} al patrón de nombre de arriba para mostrar la tonalidad de cada kit. Las carpetas filtrables llevan una insignia 🎵.",
  hint_matchkey_off:"Ninguna carpeta tiene tonalidad detectada todavía — añade \"C1\", \"Dm\", \"F#\" o similar a los nombres de archivo para usar este filtro.",
@@ -531,7 +545,7 @@ function applyStatic(){
   document.querySelectorAll("[data-title]").forEach(e=>e.title=t(e.dataset.title));
   document.documentElement.lang=LANG}
 const colName=c=>{const m=/^Import(?:ed|ado) (\d+)$/.exec(c.name);return m?t("col.imported")+" "+m[1]:(I18N[LANG]["col."+c.name]||c.name)};
-const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",lang:"",preset:"",folders:[],padmap:{}};
+const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,lang:"",preset:"",folders:[],padmap:{}};
 let PAL=[],PRESETS={},GROUPS={},GROUPNAMES=[],GROUPCOLORS={},active=null,bank=0,palFor=null,palType="folder",MAC=true,saveT=null,copyTarget="all";
 const $=id=>document.getElementById(id), BANKS="ABCDEFGH";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -585,7 +599,7 @@ async function deletePreset(){
   const name=$("presetSel").value;if(!PRESETS[name]||!confirm(t("preset_delete_confirm",name)))return;
   const r=await api("/api/presets",{action:"delete",name});if(r.error)return;
   PRESETS=r.presets;if(S.preset===name)S.preset="";render();save()}
-async function scan(f){const r=await api("/api/scan",{path:f.path,recursive:S.recursive});f.count=r.count;f.keys=r.keys||{}}
+async function scan(f){const r=await api("/api/scan",{path:f.path,recursive:S.recursive||f.pack,pack:!!f.pack});f.count=r.count;f.keys=r.keys||{};f.groupCounts=r.groupCounts||{}}
 const KEY_ORDER=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 const keySort=(a,b)=>{const ba=a.replace("m",""),bb=b.replace("m","");return KEY_ORDER.indexOf(ba)-KEY_ORDER.indexOf(bb)||a.length-b.length};
 function allKeys(){const s=new Set();for(const f of S.folders)for(const k in (f.keys||{}))s.add(k);return[...s].sort(keySort)}
@@ -601,7 +615,7 @@ function padClick(n,ev){if(!active){$("msg").textContent=t("pick_first");return}
   assign(n,S.mix!==!!(ev&&ev.shiftKey));$("msg").textContent="";render();save()}
 function fillBank(){if(!active)return;for(let i=1;i<=16;i++){const n=bank*16+i,cur=S.padmap[n]||[];
   if(!cur.some(e=>entryId(e)===active))S.padmap[n]=S.mix?[...cur,active]:[active]}render();save()}
-function togglePack(id){const f=S.folders.find(x=>x.id===id);f.pack=!f.pack;render();save()}
+async function togglePack(id){const f=S.folders.find(x=>x.id===id);f.pack=!f.pack;await scan(f);render();save()}
 function setGroup(n,fid,group){
   S.padmap[n]=(S.padmap[n]||[]).map(e=>entryId(e)===fid?(group?{id:fid,group}:fid):e);
   render();save()}
@@ -643,7 +657,8 @@ function render(){
     <button onclick="event.stopPropagation();rm('${f.id}')">✕</button></div>`}).join("")||`<div class="hint">${t("no_folders")}</div>`;
   $("tabs").innerHTML=[...BANKS].map((b,i)=>`<button class="${i===bank?"sel":""}" onclick="bank=${i};render()">${b}</button>`).join("");
   $("bname").textContent=t("bank",BANKS[bank]);
-  const groupOpts=(sel)=>`<option value="">${esc(t("kw_whole"))}</option>`+GROUPNAMES.map(g=>`<option value="${esc(g)}" ${sel===g?"selected":""}>${esc(g)}</option>`).join("");
+  const groupOpts=(sel,f)=>`<option value="">${esc(t("kw_whole"))}</option>`+GROUPNAMES.map(g=>{const n=f&&f.groupCounts?f.groupCounts[g]:undefined;
+    const lbl=n===undefined?g:`${g} (${n})${n===0?" ⚠":""}`;return `<option value="${esc(g)}" ${sel===g?"selected":""}>${esc(lbl)}</option>`}).join("");
   let h="";for(let r=3;r>=0;r--)for(let c=0;c<4;c++){const n=bank*16+r*4+c+1,entries=S.padmap[n]||[],
    pairs=entries.map(e=>({e,f:S.folders.find(x=>x.id===entryId(e))})).filter(x=>x.f),f=pairs[0]&&pairs[0].f;
    const bg=!f?"":pairs.length===1?css(entryColor(pairs[0].e,pairs[0].f)):`linear-gradient(135deg,${pairs.map((x,k)=>`${css(entryColor(x.e,x.f))} ${k*100/pairs.length}% ${(k+1)*100/pairs.length}%`).join(",")})`;
@@ -651,14 +666,14 @@ function render(){
    const body=pairs.map(({e,f})=>{
      if(!f.pack)return `<small>${esc(f.path.split(/[\\/]/).pop())}</small>`;
      const g=entryGroup(e),dot=g?`<span class="padcolor" style="background:${css(entryColor(e,f))}" onclick="event.stopPropagation();openPalGroup('${jsq(g)}')" title="${esc(t('group_color_title',g))}"></span>`:"";
-     return `<div class="padkw">${dot}<select onclick="event.stopPropagation()" onchange="setGroup(${n},'${f.id}',this.value)">${groupOpts(g)}</select></div>`}).join("");
+     return `<div class="padkw">${dot}<select onclick="event.stopPropagation()" onchange="setGroup(${n},'${f.id}',this.value)">${groupOpts(g,f)}</select></div>`}).join("");
    h+=`<div class="pad" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span>${n}</span>${body}</div>`}
   $("pads").innerHTML=h;
   const ct=[...Array(8).keys()].filter(b=>b!==bank);if(copyTarget!=="all"&&+copyTarget===bank)copyTarget="all";
   $("copyTo").innerHTML=`<option value="all">${t("opt_all")}</option>`+ct.map(b=>`<option value="${b}">${t("bank",BANKS[b])}</option>`).join("");$("copyTo").value=copyTarget;
   $("tpl").textContent=S.template||t("tpl_builtin");$("out").textContent=S.output||t("not_chosen");
   for(const k of["kits","name","seed"])if(document.activeElement!==$(k))$(k).value=S[k];
-  for(const k of["recursive","clear","hardlink","mix"])$(k).checked=S[k];
+  for(const k of["recursive","clear","hardlink","mix","padNumbering"])$(k).checked=S[k];
   const ks=allKeys(),hasKeys=ks.length>0;
   $("matchKeyOn").checked=!!S.matchKey;$("matchKeyOn").disabled=!hasKeys&&!S.matchKey;
   $("matchKeyRow").style.display=S.matchKey?"flex":"none";
@@ -666,7 +681,7 @@ function render(){
   if(S.matchKey)$("matchKeySel").value=ks.includes(S.matchKey)?S.matchKey:"random";
   $("matchKeyHint").textContent=hasKeys?t("hint_matchkey"):t("hint_matchkey_off")}
 for(const k of["kits","name","seed"])$(k).oninput=e=>{S[k]=e.target.value;save()};
-for(const k of["recursive","clear","hardlink","mix"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
+for(const k of["recursive","clear","hardlink","mix","padNumbering"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
 $("matchKeyOn").onchange=e=>{S.matchKey=e.target.checked?"random":"";render();save()};
 $("matchKeySel").onchange=e=>{S.matchKey=e.target.value;save()};
 $("lang").onchange=e=>{LANG=S.lang=e.target.value;$("msg").textContent="";applyStatic();render();save()};

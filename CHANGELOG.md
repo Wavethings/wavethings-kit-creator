@@ -3,6 +3,46 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] - 2026-09-28
+
+### Fixed
+- **A pad set to a keyword group could end up with an unrelated sample** (a chord on a Snare
+  pad). Causes, all fixed:
+  - When a group matched nothing in the pack, the pad was filled with *any* sample of the pack.
+    It is now left **empty** and reported in the log.
+  - A group name that isn't in `keyword_groups.txt` (renamed or deleted) silently used the whole
+    pack. It is now skipped, with a warning.
+  - The key filter treated a whole pack as "tonal" and could empty its drum pads (which carry no
+    key), triggering the fallback above. It now applies per pad: only pads whose matching
+    samples carry a key are limited to it. If a melodic pad has nothing in the chosen key it uses
+    another key instead of staying empty.
+  - Keywords of one or two letters (`sd`, `cp`, `bd`, `hh`) matched inside unrelated words
+    ("Subdued" contains "bd"); they now only match as whole words. Longer keywords still match
+    anywhere, and now also across separators and camelCase ("Bass_Drum", "HiHat").
+
+### Added
+- Each option in a pad's group dropdown shows how many samples of that pack it matches, e.g.
+  "Snare (12)", with a ⚠ when it's 0, so a group that finds nothing is visible before generating.
+
+## [1.9.0] - 2026-09-28
+
+### Fixed
+- **Pack/keyword filtering could silently ignore subfolders and pick random samples instead.**
+  A folder used with a keyword group (or the key filter) is now always scanned recursively,
+  regardless of the "include subfolders" setting — matching by subfolder name (how most packs
+  are organized) only works if those subfolders actually get scanned. Previously, with that
+  setting off, a pack with any loose files at its top level would find no keyword matches there,
+  trigger the no-match fallback, and quietly pick from those loose files instead — looking like
+  the filter wasn't working at all.
+
+### Added
+- **Number samples by pad**, a new option (checkbox in the interface, `--pad-numbering` on the
+  command line) that prefixes every output sample with its pad number (e.g. "001_Kick.wav").
+  Sorting the kit folder by name then also sorts it by pad, which is what lets samplers with no
+  `.xpm` support of their own — Maschine, Battery, several hardware samplers — import a kit too:
+  select a bank's 16 files together and drop them onto the sampler's first pad, and it typically
+  auto-assigns one file per pad from there, in that order.
+
 ## [1.8.0] - 2026-09-28
 
 ### Added
