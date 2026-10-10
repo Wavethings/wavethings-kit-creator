@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.9.2] - 2026-10-10
+
+### Added
+- **All kits and samples in one folder** (checkbox "All kits and samples in one folder", `--flat`
+  on the command line, `"flat_output": true` in the config). Instead of a subfolder per kit,
+  every `.xpm` and all samples go straight into the output folder, which is easier to browse
+  on the MPC (its file browser can filter to show only kits). A sample already there with
+  identical content is shared by the kits; a different file with the same name is stored as
+  `name_2`, `name_3`…; nothing existing is ever overwritten, so later batches simply add kits.
+- **Exclusion keywords**: a keyword starting with `-` (e.g. `-loop`, `-open`) keeps matching
+  samples out of a group.
+- New default groups **FX, Fill, Vocal and Loop**.
+
+### Changed
+- **Keyword matching is tuned for real sample packs**, which are sorted into folders by role
+  (and usually keep loops apart from one-shots). Folder names and file names are now judged
+  separately: a folder named after a group is a strong signal ("Drum - Kick - One Shots/…"), a
+  file name that names a group wins unless folder and name point elsewhere, and a sample that
+  clearly belongs to another group is not shared with this one ("Hats/Open Hat 1" is not a
+  closed hihat; a Kick named "Snaplow" is not a snare). Short keywords still match only as
+  whole words. Tested on two real packs.
+- The key filter only narrows a pad whose samples are mostly tonal (at least half carry a key).
+- The default `keyword_groups.txt` has the new groups and exclusions. A file you never edited
+  is upgraded automatically (the old one is saved as `keyword_groups.txt.bak`); an edited file
+  is left as it is.
+
 ## [1.9.1] - 2026-09-28
 
 ### Fixed

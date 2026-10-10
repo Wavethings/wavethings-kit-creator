@@ -101,6 +101,13 @@ def load_groups():
     call (cheap, small file) so an edit just needs a page reload to take effect."""
     if not GROUPS_FILE.is_file():
         GROUPS_FILE.write_text(kc.DEFAULT_KEYWORD_GROUPS_TEXT, encoding="utf-8")
+    else:       # an untouched file from versions 1.7-1.9.1 is upgraded to the current defaults
+        try:
+            if kc.load_keyword_groups(GROUPS_FILE.read_text(encoding="utf-8")) == kc.LEGACY_DEFAULT_GROUPS:
+                shutil.copy2(GROUPS_FILE, GROUPS_FILE.with_name(GROUPS_FILE.name + ".bak"))
+                GROUPS_FILE.write_text(kc.DEFAULT_KEYWORD_GROUPS_TEXT, encoding="utf-8")
+        except OSError:
+            pass
     try:
         return kc.load_keyword_groups(GROUPS_FILE.read_text(encoding="utf-8"))
     except OSError:
@@ -203,6 +210,7 @@ def run_job(st):
         groups = load_groups()
         group_colors = load_group_colors()
         pads, colors, mutes = {}, {}, {}
+        ctx = tuple(tuple(v) for v in groups.values())     # all groups, so overlaps are resolved
         for pad, entries in st["padmap"].items():
             entries = entries if isinstance(entries, list) else [entries]
             items, used_folders, used_groups = [], [], []
@@ -217,7 +225,7 @@ def run_job(st):
                 if group and not kw:        # never fall back to "the whole pack" for a typo/rename
                     log(kc.msg("group_missing", pad=pad, group=group))
                     continue
-                items.append((path, kw) if kw else path)
+                items.append((path, kw, ctx) if kw else path)
                 used_folders.append(f)
                 used_groups.append(group)
             if items:   # the pad's color and mute group are those of its first folder, unless
@@ -233,7 +241,8 @@ def run_job(st):
         kc.generate_kits(template, st["output"], int(st["kits"]), st["name"] or "Kit {n:03d}", pads,
                          colors=colors, clear_others=bool(st["clear"]), recursive=bool(st["recursive"]),
                          hardlink=bool(st["hardlink"]), seed=seed, log=log, mutegroups=mutes,
-                         match_key=match_key, pad_numbering=bool(st.get("padNumbering")))
+                         match_key=match_key, pad_numbering=bool(st.get("padNumbering")),
+                         flat_output=bool(st.get("flatOutput")))
     except Exception as e:  # show any error in the interface
         JOB["error"] = f"{type(e).__name__}: {e}"
     JOB["done"] = True
@@ -343,8 +352,7 @@ class H(BaseHTTPRequestHandler):
             keys = {k: len(v) for k, v in kc.index_by_key(files).items()} if files else {}
             counts = {}
             if data.get("pack") and files:     # how many samples each keyword group would find
-                counts = {name: sum(1 for f in files if kc.matches_keywords(d, f, kws))
-                          for name, kws in load_groups().items()}
+                counts = kc.group_match_counts(d, files, load_groups())
             return self.send({"count": len(files) if d.is_dir() else -1, "keys": keys,
                               "groupCounts": counts})
         if self.path == "/api/import_colors":
@@ -439,6 +447,8 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
   <label class="chk"><input type="checkbox" id="matchKeyOn"><span data-i18n="chk_matchkey"></span></label>
   <div class="row" id="matchKeyRow" style="display:none;margin:0 0 8px"><label data-i18n="lbl_matchkey"></label><select class="big" id="matchKeySel" style="flex:1"></select></div>
   <div class="hint" id="matchKeyHint" data-i18n="hint_matchkey"></div>
+  <label class="chk"><input type="checkbox" id="flatOutput"><span data-i18n="chk_flat"></span></label>
+  <div class="hint" data-i18n="hint_flat"></div>
   <label class="chk"><input type="checkbox" id="padNumbering"><span data-i18n="chk_padnum"></span></label>
   <div class="hint" data-i18n="hint_padnum"></div>
   <div class="row" style="margin-top:12px"><button class="pri" id="go" onclick="generate()" data-i18n="btn_go"></button><span id="msg"></span></div>
@@ -476,6 +486,8 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
  lbl_folder:"Folder",btn_choose:"Choose…",lbl_kits:"No. of kits",lbl_name:"Name",lbl_seed:"Seed",ph_seed:"(optional) same seed = same kits",
  chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_hardlink:"Link samples instead of copying (saves space)",
+ chk_flat:"All kits and samples in one folder",
+ hint_flat:"Instead of one folder per kit, every .xpm and all samples go straight into the output folder. Easier to browse on the MPC, whose file browser can filter to show only kits. A sample that is already there with identical content is shared by the kits; a different file with the same name gets a numeric suffix. Nothing existing is overwritten.",
  chk_padnum:"Number samples by pad (for Maschine and others)",
  hint_padnum:"Prefixes every output sample with its pad number (e.g. \"001_Kick.wav\"), so sorting the kit folder by name also sorts it by pad. Lets samplers with no .xpm support of their own import the kit too: select a bank's 16 files together in Finder/Explorer (already in order) and drop them onto the sampler's first pad — Maschine, Battery and most hardware samplers auto-assign one file per pad from there.",
  chk_matchkey:"Filter by key",lbl_matchkey:"Key",key_random:"Random per kit",
@@ -512,6 +524,8 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
  lbl_folder:"Carpeta",btn_choose:"Elegir…",lbl_kits:"Nº de kits",lbl_name:"Nombre",lbl_seed:"Semilla",ph_seed:"(opcional) misma semilla = mismos kits",
  chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_hardlink:"Enlazar samples en vez de copiar (ahorra espacio)",
+ chk_flat:"Todos los kits y samples en una sola carpeta",
+ hint_flat:"En lugar de una carpeta por kit, todos los .xpm y los samples van directamente a la carpeta de salida. Más cómodo en la MPC, cuyo navegador puede filtrar para mostrar solo kits. Un sample que ya esté allí con el mismo contenido se comparte entre kits; un archivo distinto con el mismo nombre recibe un sufijo numérico. No se sobrescribe nada existente.",
  chk_padnum:"Numerar samples por pad (para Maschine y otros)",
  hint_padnum:"Añade el número de pad delante de cada muestra de salida (p. ej. \"001_Kick.wav\"), para que ordenar la carpeta del kit por nombre también la ordene por pad. Así, un sampler sin soporte propio de .xpm puede importar el kit igualmente: selecciona juntos los 16 archivos de un banco en el Finder/Explorador (ya están en orden) y suéltalos sobre el primer pad del sampler — Maschine, Battery y la mayoría de samplers hardware asignan uno por pad a partir de ahí.",
  chk_matchkey:"Filtrar por tonalidad",lbl_matchkey:"Tonalidad",key_random:"Aleatoria por kit",
@@ -545,7 +559,7 @@ function applyStatic(){
   document.querySelectorAll("[data-title]").forEach(e=>e.title=t(e.dataset.title));
   document.documentElement.lang=LANG}
 const colName=c=>{const m=/^Import(?:ed|ado) (\d+)$/.exec(c.name);return m?t("col.imported")+" "+m[1]:(I18N[LANG]["col."+c.name]||c.name)};
-const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,lang:"",preset:"",folders:[],padmap:{}};
+const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",preset:"",folders:[],padmap:{}};
 let PAL=[],PRESETS={},GROUPS={},GROUPNAMES=[],GROUPCOLORS={},active=null,bank=0,palFor=null,palType="folder",MAC=true,saveT=null,copyTarget="all";
 const $=id=>document.getElementById(id), BANKS="ABCDEFGH";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -673,7 +687,7 @@ function render(){
   $("copyTo").innerHTML=`<option value="all">${t("opt_all")}</option>`+ct.map(b=>`<option value="${b}">${t("bank",BANKS[b])}</option>`).join("");$("copyTo").value=copyTarget;
   $("tpl").textContent=S.template||t("tpl_builtin");$("out").textContent=S.output||t("not_chosen");
   for(const k of["kits","name","seed"])if(document.activeElement!==$(k))$(k).value=S[k];
-  for(const k of["recursive","clear","hardlink","mix","padNumbering"])$(k).checked=S[k];
+  for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput"])$(k).checked=S[k];
   const ks=allKeys(),hasKeys=ks.length>0;
   $("matchKeyOn").checked=!!S.matchKey;$("matchKeyOn").disabled=!hasKeys&&!S.matchKey;
   $("matchKeyRow").style.display=S.matchKey?"flex":"none";
@@ -681,7 +695,7 @@ function render(){
   if(S.matchKey)$("matchKeySel").value=ks.includes(S.matchKey)?S.matchKey:"random";
   $("matchKeyHint").textContent=hasKeys?t("hint_matchkey"):t("hint_matchkey_off")}
 for(const k of["kits","name","seed"])$(k).oninput=e=>{S[k]=e.target.value;save()};
-for(const k of["recursive","clear","hardlink","mix","padNumbering"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
+for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
 $("matchKeyOn").onchange=e=>{S.matchKey=e.target.checked?"random":"";render();save()};
 $("matchKeySel").onchange=e=>{S.matchKey=e.target.value;save()};
 $("lang").onchange=e=>{LANG=S.lang=e.target.value;$("msg").textContent="";applyStatic();render();save()};

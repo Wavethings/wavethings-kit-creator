@@ -19,5 +19,7 @@
   "mute_groups": {
     "3-5": 1
   },
-  "match_key": "random"
+  "match_key": "random",
+  "pad_numbering": false,
+  "flat_output": false
 }
