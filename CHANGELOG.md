@@ -14,7 +14,12 @@ All notable changes to this project are documented here. Format based on
   `name_2`, `name_3`…; nothing existing is ever overwritten, so later batches simply add kits.
 - **Exclusion keywords**: a keyword starting with `-` (e.g. `-loop`, `-open`) keeps matching
   samples out of a group.
-- New default groups **FX, Fill, Vocal and Loop**.
+- **Required keywords**: a keyword starting with `+` must be present in the path (`Loop Bass:
+  +loop, bass, sub` = loops that also say bass or sub).
+- **Subgroups** in the default groups. Melodic is split into Bass, Lead, Pluck, Chord, Stab, Pad,
+  Arp, Keys and Acid, and loops into Loop Drums, Loop Bass, Loop Synth, Loop Vocal and Loop FX,
+  based on how the two example packs organize their folders. The broad groups (Melodic, Loop)
+  still contain their subgroups. Other new groups: FX, Fill, Vocal and Loop.
 
 ### Changed
 - **Keyword matching is tuned for real sample packs**, which are sorted into folders by role

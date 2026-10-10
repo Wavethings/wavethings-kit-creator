@@ -669,7 +669,9 @@ class KeywordGroupsFile(unittest.TestCase):
         g = kc.load_keyword_groups(kc.DEFAULT_KEYWORD_GROUPS_TEXT)
         self.assertEqual(list(g)[:7], ["Kick", "Snare", "Clap", "Closed Hihat", "Open Hihat",
                                        "Percusion", "Melodic"])
-        self.assertEqual(list(g)[7:], ["FX", "Fill", "Vocal", "Loop"])
+        for name in ("Bass", "Lead", "Pluck", "Chord", "Stab", "Pad", "FX", "Fill", "Vocal", "Loop",
+                     "Loop Drums", "Loop Bass", "Loop Synth", "Loop Vocal", "Loop FX"):
+            self.assertIn(name, g)
         self.assertIn("kick", g["Kick"])
         self.assertIn("-loop", g["Kick"])
         self.assertIn("vibraphone", g["Melodic"])
@@ -1045,6 +1047,28 @@ Synth - Loops/DPT_Synth_Loop_125_Bpm_Am.wav""".splitlines()
         loops = self.members("Loop", self.PACK2)
         self.assertEqual(len(loops), 5)
 
+    def test_required_keyword_splits_loops_by_type(self):
+        files = ["Bass - Loops/DPT_Bass_Loop_125_C.wav", "Synth - Pluck - Loops/DPT_Pluck_Loop_A.wav",
+                 "Drum - Hat - Loops/DPT_Hat_Loop_1.wav", "Vocal - Chop - Loops/DPT_Vocal_Chop_Loop_You.wav",
+                 "Bass - One Shot/DPT_C_Bass_One_Shot_Gold.wav", "Drum - Kick - One Shots/Kick.wav"]
+        self.assertEqual(self.members("Loop Bass", files), [files[0]])
+        self.assertEqual(self.members("Loop Synth", files), [files[1]])
+        self.assertEqual(self.members("Loop Drums", files), [files[2]])
+        self.assertEqual(self.members("Loop Vocal", files), [files[3]])
+        self.assertEqual(self.members("Loop", files), files[:4])
+        self.assertEqual(self.members("Bass", files), [files[4]])      # not the bass loop
+
+    def test_subgroups_split_melodic_but_melodic_keeps_them(self):
+        files = ["06 Leads/Lead Sad C.wav", "06 Leads/Synth Pluck 3 C.wav", "07 Pad/Chords/EP chord 2.wav",
+                 "05 Bass/Angry bass/long growl F.wav", "01 Kicks/Kick 808 C.wav"]
+        self.assertEqual(self.members("Lead", files), [files[0]])
+        self.assertEqual(self.members("Pluck", files), [files[1]])
+        self.assertEqual(self.members("Chord", files), [files[2]])
+        self.assertEqual(self.members("Bass", files), [files[3]])
+        mel = self.members("Melodic", files)
+        for f in files[:4]:
+            self.assertIn(f, mel)
+
     def test_exclusion_keyword(self):
         root = Path("/p")
         self.assertTrue(kc.matches_keywords(root, root / "Kick 01.wav", ["kick", "-loop"]))
@@ -1098,6 +1122,11 @@ class GroupsFileUpgrade(unittest.TestCase):
         self.assertTrue((self.dir / "keyword_groups.txt.bak").is_file())
         self.assertIn("# my comment", (self.dir / "keyword_groups.txt.bak").read_text(encoding="utf-8"))
 
+    def test_first_192_build_defaults_are_upgraded_too(self):
+        gui.GROUPS_FILE.write_text("".join(f"{n}: {', '.join(k)}\n" for n, k in
+                                           kc.LEGACY_DEFAULT_GROUPS_192.items()), encoding="utf-8")
+        self.assertIn("Loop Bass", gui.load_groups())
+
     def test_edited_file_is_left_alone(self):
         text = self.legacy_text() + "Snare: snare\n"
         gui.GROUPS_FILE.write_text(text, encoding="utf-8")
@@ -1106,4 +1135,4 @@ class GroupsFileUpgrade(unittest.TestCase):
         self.assertFalse((self.dir / "keyword_groups.txt.bak").exists())
 
     def test_new_file_gets_the_current_defaults(self):
-        self.assertEqual(list(gui.load_groups())[-1], "Loop")
+        self.assertEqual(list(gui.load_groups())[-1], "Loop FX")

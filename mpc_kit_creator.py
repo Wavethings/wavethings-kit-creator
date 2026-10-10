@@ -81,28 +81,49 @@ def index_by_key(files):
 # here is hard-coded other than that starting content.
 DEFAULT_KEYWORD_GROUPS_TEXT = """\
 # Wavethings Kit Creator - keyword groups for Pack mode.
-# One group per line: Group Name: keyword1, keyword2, -excluded
+# One group per line: Group Name: keyword1, keyword2, -excluded, +required
 # Edit this file in any plain-text editor and reload the page to see the change.
 # Matching is case-insensitive and looks at BOTH the subfolder names and the file name of each
 # sample inside the pack, so a group like "Kick" finds "Kicks/Deep 01.wav" and "Kick 01.wav".
-# A keyword starting with "-" is an exclusion: a sample whose path contains it is never put in
-# that group (e.g. "-loop" keeps loops out of the one-shot groups).
+#   -word  exclusion: a sample whose path contains it never goes in this group ("-loop" keeps
+#          loops out of the one-shot groups).
+#   +word  requirement: the path must contain it. "Loop Bass: +loop, bass, sub" = loops that
+#          also say bass or sub.
 # Short keywords (up to 3-4 letters, like sd, cp, hh) only match as whole words.
+# Groups may overlap on purpose: "Melodic" is the broad one; Bass, Lead, Pluck, Chord, Stab,
+# Pad, Arp, Keys and Acid are its subgroups. Likewise "Loop" is every loop, and the Loop ...
+# groups split loops by type.
 Kick: kick, kek, kik, bass drum, bassdrum, bass kick, bd, -loop, -fill
 Snare: snare, snr, sd, rimshot, -loop, -fill
 Clap: clap, cp, -loop, -fill
 Closed Hihat: hat, hihat, closed, hhcl, clhat, clhihat, hh, tops, -open, -ohh, -hhop, -loop, -fill
 Open Hihat: open, hhop, ohh, ophihat, ophat, -closed, -loop, -fill
 Percusion: perc, tom, cymbal, crash, ride, shake, tamb, wood, bell, conga, congo, bongo, clave, cowbell, -loop, -fill, -fx
-Melodic: key, acid, synth, pad, bass, sub, 808, guitar, lead, vibraphone, chord, pluck, arp, piano, organ, -loop, -fx
+Melodic: key, acid, synth, pad, bass, sub, 808, guitar, lead, vibraphone, chord, pluck, arp, piano, organ, stab, reese, growl, donk, rhodes, strings, ep, -loop, -fx
+Bass: bass, sub, 808, reese, growl, -loop, -fx, -drum, -kick
+Lead: lead, -loop, -fx
+Pluck: pluck, donk, -loop, -fx
+Chord: chord, -loop, -fx
+Stab: stab, -loop, -fx
+Pad: pad, strings, -loop, -fx
+Arp: arp, -loop, -fx
+Keys: key, piano, organ, ep, rhodes, -loop, -fx
+Acid: acid, -loop, -fx
 FX: fx, riser, sweep, impact, faller, whitenoise, reverse, glitch, -loop
 Fill: fill, -loop
 Vocal: vocal, vox, voice, -loop
 Loop: loop, groove
+Loop Drums: +loop, drum, break, beat, hat, kick, snare, clap, ride, top, build, perc, shaker
+Loop Bass: +loop, bass, sub, 808, reese
+Loop Synth: +loop, synth, acid, arp, chord, lead, pad, pluck, stab, key, piano
+Loop Vocal: +loop, vocal, vox, voice, adlib, phrase
+Loop FX: +loop, fx, atmosphere, riser, sweep
 """
 
 # The default groups of versions 1.7 - 1.9.1. A keyword_groups.txt that still equals this (the
 # person never edited it) is upgraded to the current defaults by the interface.
+LEGACY_DEFAULT_GROUPS_192 = {"Kick": ["kick", "kek", "kik", "bass drum", "bassdrum", "bass kick", "bd", "-loop", "-fill"], "Snare": ["snare", "snr", "sd", "rimshot", "-loop", "-fill"], "Clap": ["clap", "cp", "-loop", "-fill"], "Closed Hihat": ["hat", "hihat", "closed", "hhcl", "clhat", "clhihat", "hh", "tops", "-open", "-ohh", "-hhop", "-loop", "-fill"], "Open Hihat": ["open", "hhop", "ohh", "ophihat", "ophat", "-closed", "-loop", "-fill"], "Percusion": ["perc", "tom", "cymbal", "crash", "ride", "shake", "tamb", "wood", "bell", "conga", "congo", "bongo", "clave", "cowbell", "-loop", "-fill", "-fx"], "Melodic": ["key", "acid", "synth", "pad", "bass", "sub", "808", "guitar", "lead", "vibraphone", "chord", "pluck", "arp", "piano", "organ", "-loop", "-fx"], "FX": ["fx", "riser", "sweep", "impact", "faller", "whitenoise", "reverse", "glitch", "-loop"], "Fill": ["fill", "-loop"], "Vocal": ["vocal", "vox", "voice", "-loop"], "Loop": ["loop", "groove"]}   # the first 1.9.2 build (11 groups)
+
 LEGACY_DEFAULT_GROUPS = {
     "Kick": ["kick", "kek", "kik", "bass drum", "bassdrum", "bass kick", "bd"],
     "Snare": ["snare", "snr", "snap", "stick", "sd"],
@@ -294,11 +315,15 @@ KEYED_SHARE = 0.5      # a pad is "melodic" (key filter applies) if this share o
 
 
 def _split_keywords(keywords):
-    """(positive, negative) keyword lists; a keyword written as "-loop" is an exclusion."""
-    pos = [k.strip().lower() for k in keywords if k.strip() and not k.strip().startswith("-")]
-    neg = [k.strip()[1:].strip().lower() for k in keywords
-           if k.strip().startswith("-") and k.strip()[1:].strip()]
-    return pos, neg
+    """(positive, negative, required) keyword lists. "-loop" is an exclusion; "+loop" is a
+    requirement: the sample's path must contain it (combined with the plain keywords, which then
+    pick the type: "+loop, bass, sub" = loops that also say bass or sub). A group made only of
+    "+" keywords uses them as its plain keywords too."""
+    ks = [k.strip() for k in keywords if k.strip()]
+    pos = [k.lower() for k in ks if k[0] not in "+-"]
+    neg = [k[1:].strip().lower() for k in ks if k[0] == "-" and k[1:].strip()]
+    req = [k[1:].strip().lower() for k in ks if k[0] == "+" and k[1:].strip()]
+    return pos, neg, req
 
 
 def _keyword_hit(keyword, text, tokens, min_substring):
@@ -323,6 +348,20 @@ def _specs(context):
     return [_split_keywords(g) for g in context]
 
 
+def _subgroups(specs):
+    """subs[g] = indexes of groups related to g by being broader or more specific than it, so
+    they never disqualify each other (Melodic and Chord). A group is more specific when all of its
+    keywords are also keywords of the other ("Chord" inside "Melodic"), or the one thing it
+    requires is a keyword of the other ("Loop Bass" requires "loop", which is what "Loop" is)."""
+    subs = []
+    for i, (pos, _, req) in enumerate(specs):
+        mine = set(pos) | set(req)
+        subs.append({j for j, (p2, _, r2) in enumerate(specs)
+                     if j != i and (p2 or r2)
+                     and (set(p2) | set(r2) <= mine or (r2 and set(r2) <= set(pos)))})
+    return [subs[i] | {j for j in range(len(specs)) if i in subs[j]} for i in range(len(specs))]
+
+
 def _profile(rel_raw, specs):
     """For one sample path (relative to its pack): per keyword group a tuple
     (folder_hit, name_hit, excluded). Folder names and the file name are judged separately
@@ -334,15 +373,17 @@ def _profile(rel_raw, specs):
     dirs, name, full = dirs_raw.lower(), name_raw.lower(), full_raw.lower()
     d_tok, n_tok, f_tok = _word_tokens(dirs_raw), _word_tokens(name_raw), _word_tokens(full_raw)
     out = []
-    for pos, neg in specs:
-        excluded = any(_keyword_hit(k, full, f_tok, _DIR_MIN) for k in neg)
-        dir_hit = any(_keyword_hit(k, dirs, d_tok, _DIR_MIN) for k in pos) if dirs else False
-        name_hit = any(_keyword_hit(k, name, n_tok, _NAME_MIN) for k in pos)
+    for pos, neg, req in specs:
+        excluded = (any(_keyword_hit(k, full, f_tok, _DIR_MIN) for k in neg)
+                    or not all(_keyword_hit(k, full, f_tok, _DIR_MIN) for k in req))
+        hits = pos or req
+        dir_hit = any(_keyword_hit(k, dirs, d_tok, _DIR_MIN) for k in hits) if dirs else False
+        name_hit = any(_keyword_hit(k, name, n_tok, _NAME_MIN) for k in hits)
         out.append((dir_hit, name_hit, excluded))
     return out
 
 
-def _decide(profile, g):
+def _decide(profile, g, subs=None):
     """Does the sample belong to group g? A file name that names the group wins, unless the
     folder AND the name of the sample point at another group instead; a folder-only hit counts
     unless another group's name matches the file ("Fills/Snare Roll" is a fill, not a snare...
@@ -350,7 +391,8 @@ def _decide(profile, g):
     dir_ok, name_hit, rejected = profile[g]
     if rejected:
         return False
-    others = [p for i, p in enumerate(profile) if i != g and not p[2]]
+    skip = subs[g] if subs else ()
+    others = [p for i, p in enumerate(profile) if i != g and i not in skip and not p[2]]
     if name_hit:
         return dir_ok or not any(p[0] and p[1] for p in others)
     if dir_ok:
@@ -381,7 +423,8 @@ def _matching_files(folder, files, keywords, context=None, match_cache=None):
     if match_cache is not None and key in match_cache:
         return match_cache[key]
     specs, g = _specs(ctx), ctx.index(kw)
-    res = [f for f in files if _decide(_profile(_rel(folder, f), specs), g)]
+    subs = _subgroups(specs)
+    res = [f for f in files if _decide(_profile(_rel(folder, f), specs), g, subs)]
     if match_cache is not None:
         match_cache[key] = res
     return res
@@ -390,7 +433,8 @@ def _matching_files(folder, files, keywords, context=None, match_cache=None):
 def matches_keywords(folder, file, keywords, context=None):
     """True if `file` belongs to the keyword group `keywords` of pack `folder` (see _decide)."""
     kw, ctx = _context_for(keywords, context)
-    return _decide(_profile(_rel(folder, file), _specs(ctx)), ctx.index(kw))
+    specs = _specs(ctx)
+    return _decide(_profile(_rel(folder, file), specs), ctx.index(kw), _subgroups(specs))
 
 
 def group_match_counts(folder, files, groups):
@@ -398,11 +442,12 @@ def group_match_counts(folder, files, groups):
     names = list(groups)
     ctx = [tuple(groups[n]) for n in names]
     specs = _specs(ctx)
+    subs = _subgroups(specs)
     counts = dict.fromkeys(names, 0)
     for f in files:
         prof = _profile(_rel(folder, f), specs)
         for i, n in enumerate(names):
-            if _decide(prof, i):
+            if _decide(prof, i, subs):
                 counts[n] += 1
     return counts
 

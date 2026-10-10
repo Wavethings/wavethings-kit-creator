@@ -1,19 +1,38 @@
 # Wavethings Kit Creator - keyword groups for Pack mode.
-# One group per line: Group Name: keyword1, keyword2, -excluded
+# One group per line: Group Name: keyword1, keyword2, -excluded, +required
 # Edit this file in any plain-text editor and reload the page to see the change.
 # Matching is case-insensitive and looks at BOTH the subfolder names and the file name of each
 # sample inside the pack, so a group like "Kick" finds "Kicks/Deep 01.wav" and "Kick 01.wav".
-# A keyword starting with "-" is an exclusion: a sample whose path contains it is never put in
-# that group (e.g. "-loop" keeps loops out of the one-shot groups).
+#   -word  exclusion: a sample whose path contains it never goes in this group ("-loop" keeps
+#          loops out of the one-shot groups).
+#   +word  requirement: the path must contain it. "Loop Bass: +loop, bass, sub" = loops that
+#          also say bass or sub.
 # Short keywords (up to 3-4 letters, like sd, cp, hh) only match as whole words.
+# Groups may overlap on purpose: "Melodic" is the broad one; Bass, Lead, Pluck, Chord, Stab,
+# Pad, Arp, Keys and Acid are its subgroups. Likewise "Loop" is every loop, and the Loop ...
+# groups split loops by type.
 Kick: kick, kek, kik, bass drum, bassdrum, bass kick, bd, -loop, -fill
 Snare: snare, snr, sd, rimshot, -loop, -fill
 Clap: clap, cp, -loop, -fill
 Closed Hihat: hat, hihat, closed, hhcl, clhat, clhihat, hh, tops, -open, -ohh, -hhop, -loop, -fill
 Open Hihat: open, hhop, ohh, ophihat, ophat, -closed, -loop, -fill
 Percusion: perc, tom, cymbal, crash, ride, shake, tamb, wood, bell, conga, congo, bongo, clave, cowbell, -loop, -fill, -fx
-Melodic: key, acid, synth, pad, bass, sub, 808, guitar, lead, vibraphone, chord, pluck, arp, piano, organ, -loop, -fx
+Melodic: key, acid, synth, pad, bass, sub, 808, guitar, lead, vibraphone, chord, pluck, arp, piano, organ, stab, reese, growl, donk, rhodes, strings, ep, -loop, -fx
+Bass: bass, sub, 808, reese, growl, -loop, -fx, -drum, -kick
+Lead: lead, -loop, -fx
+Pluck: pluck, donk, -loop, -fx
+Chord: chord, -loop, -fx
+Stab: stab, -loop, -fx
+Pad: pad, strings, -loop, -fx
+Arp: arp, -loop, -fx
+Keys: key, piano, organ, ep, rhodes, -loop, -fx
+Acid: acid, -loop, -fx
 FX: fx, riser, sweep, impact, faller, whitenoise, reverse, glitch, -loop
 Fill: fill, -loop
 Vocal: vocal, vox, voice, -loop
 Loop: loop, groove
+Loop Drums: +loop, drum, break, beat, hat, kick, snare, clap, ride, top, build, perc, shaker
+Loop Bass: +loop, bass, sub, 808, reese
+Loop Synth: +loop, synth, acid, arp, chord, lead, pad, pluck, stab, key, piano
+Loop Vocal: +loop, vocal, vox, voice, adlib, phrase
+Loop FX: +loop, fx, atmosphere, riser, sweep

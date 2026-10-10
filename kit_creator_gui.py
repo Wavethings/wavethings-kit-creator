@@ -103,7 +103,8 @@ def load_groups():
         GROUPS_FILE.write_text(kc.DEFAULT_KEYWORD_GROUPS_TEXT, encoding="utf-8")
     else:       # an untouched file from versions 1.7-1.9.1 is upgraded to the current defaults
         try:
-            if kc.load_keyword_groups(GROUPS_FILE.read_text(encoding="utf-8")) == kc.LEGACY_DEFAULT_GROUPS:
+            if kc.load_keyword_groups(GROUPS_FILE.read_text(encoding="utf-8")) in (
+                    kc.LEGACY_DEFAULT_GROUPS, kc.LEGACY_DEFAULT_GROUPS_192):
                 shutil.copy2(GROUPS_FILE, GROUPS_FILE.with_name(GROUPS_FILE.name + ".bak"))
                 GROUPS_FILE.write_text(kc.DEFAULT_KEYWORD_GROUPS_TEXT, encoding="utf-8")
         except OSError:
