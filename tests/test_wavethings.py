@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Wavethings
 """Tests for Wavethings Kit Creator. Run with:  python3 -m unittest discover -s tests -v"""
 import json, os, random, re, subprocess, sys, tempfile, threading, unittest, urllib.request, wave
+from unittest import mock
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
@@ -794,9 +795,12 @@ class GroupColorApi(unittest.TestCase):
     def test_edit_groups_creates_the_file_and_does_not_crash(self):
         old = gui.GROUPS_FILE
         gui.GROUPS_FILE = Path(tempfile.mkdtemp()) / "keyword_groups.txt"
+        opened = []
         try:
-            self.assertEqual(self.api("/api/edit_groups", {}), {"ok": True})
+            with mock.patch.object(gui, "open_in_editor", opened.append):    # don't launch an editor
+                self.assertEqual(self.api("/api/edit_groups", {}), {"ok": True})
             self.assertTrue(gui.GROUPS_FILE.is_file())   # created before trying to open it
+            self.assertEqual(opened, [gui.GROUPS_FILE])
         finally:
             gui.GROUPS_FILE = old
 
@@ -811,7 +815,7 @@ class EditorDispatch(unittest.TestCase):
         gui.sys.platform, gui.subprocess.run = "darwin", lambda cmd, **kw: calls.append(cmd)
         try:
             gui.open_in_editor(Path("/tmp/x.txt"))
-            self.assertEqual(calls, [["open", "-a", "TextEdit", "/tmp/x.txt"]])
+            self.assertEqual(calls, [["open", "-a", "TextEdit", str(Path("/tmp/x.txt"))]])
         finally:
             gui.sys.platform, gui.subprocess.run = old_platform, old_run
 
@@ -821,7 +825,7 @@ class EditorDispatch(unittest.TestCase):
         gui.sys.platform, gui.subprocess.run = "linux", lambda cmd, **kw: calls.append(cmd)
         try:
             gui.open_in_editor(Path("/tmp/x.txt"))
-            self.assertEqual(calls, [["xdg-open", "/tmp/x.txt"]])
+            self.assertEqual(calls, [["xdg-open", str(Path("/tmp/x.txt"))]])
         finally:
             gui.sys.platform, gui.subprocess.run = old_platform, old_run
 
@@ -829,19 +833,20 @@ class EditorDispatch(unittest.TestCase):
         calls = []
         old_platform = gui.sys.platform
         gui.sys.platform = "win32"
-        gui.os.startfile = lambda p: calls.append(p)   # only exists on real Windows
         try:
-            gui.open_in_editor(Path(r"C:\x.txt"))
-            self.assertEqual(calls, [r"C:\x.txt"])
+            # os.startfile only exists on real Windows; patch it (without deleting the real one)
+            with mock.patch.object(gui.os, "startfile", lambda p: calls.append(p), create=True):
+                gui.open_in_editor(Path("x.txt"))
+            self.assertEqual(calls, ["x.txt"])
         finally:
             gui.sys.platform = old_platform
-            del gui.os.startfile
 
 
 class CommandLine(unittest.TestCase):
     def run_cli(self, *args):
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")      # Windows pipes default to cp1252
         return subprocess.run([sys.executable, str(ROOT / "mpc_kit_creator.py"), *args],
-                              capture_output=True, text=True, encoding="utf-8")
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
     def test_version_and_help(self):
         r = self.run_cli("--version")

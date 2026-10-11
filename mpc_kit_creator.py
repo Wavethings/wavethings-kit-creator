@@ -20,7 +20,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.9.4"
+__version__ = "1.9.5"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -911,6 +911,11 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
 
 def main():
     global LANG
+    for stream in (sys.stdout, sys.stderr):  # never crash on a character the console can't show
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     for i, x in enumerate(sys.argv):        # pick the language before building --help
         if x == "--lang" and i + 1 < len(sys.argv):
             LANG = sys.argv[i + 1]

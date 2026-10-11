@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.9.5] - 2026-10-11
+
+### Fixed
+- The automated tests failed on Windows (three problems in the tests themselves, not in the app):
+  paths were compared with Linux-style slashes, a test deleted Windows' real `os.startfile`, and
+  command-line output was read as UTF-8 while Windows pipes use another code page. Also, the command
+  line no longer crashes if the console can't display a character (it prints a replacement).
+
 ## [1.9.4] - 2026-10-11
 
 ### Added
