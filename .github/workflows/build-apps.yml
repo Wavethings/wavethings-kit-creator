@@ -1,0 +1,67 @@
+name: build-apps
+
+# Builds the desktop apps (macOS and Windows) on GitHub's own machines and attaches them to the
+# release. Run it by publishing a release, or by hand from the Actions tab.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -r requirements-desktop.txt
+      - name: Tests
+        run: python -m unittest discover -s tests
+      - name: Build the app
+        shell: bash
+        run: |
+          EXTRA=""
+          if [ "$RUNNER_OS" = "macOS" ]; then EXTRA="--osx-bundle-identifier com.wavethings.kitcreator"; fi
+          pyinstaller --noconfirm --windowed --name "Wavethings Kit Creator" \
+            --icon assets/icon.png --paths . $EXTRA \
+            desktop/app.py
+      - name: Check the built app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          "dist/Wavethings Kit Creator.app/Contents/MacOS/Wavethings Kit Creator" --selftest
+          echo "selftest exit code: $?"
+      - name: Check the built app (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\dist\Wavethings Kit Creator\Wavethings Kit Creator.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "selftest failed with exit code $($p.ExitCode)" }
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Wavethings Kit Creator.app" "Wavethings-Kit-Creator-macOS.zip"
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist\Wavethings Kit Creator" -DestinationPath "Wavethings-Kit-Creator-Windows.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wavethings-Kit-Creator-${{ matrix.name }}
+          path: Wavethings-Kit-Creator-*.zip
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Wavethings-Kit-Creator-*.zip
