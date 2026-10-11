@@ -1,0 +1,4 @@
+# Only needed to run or build the desktop app (desktop/app.py); the browser version needs nothing.
+pywebview>=5.3,<7
+pyinstaller>=6.6
+pillow>=10

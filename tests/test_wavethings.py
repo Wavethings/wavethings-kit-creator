@@ -1136,3 +1136,143 @@ class GroupsFileUpgrade(unittest.TestCase):
 
     def test_new_file_gets_the_current_defaults(self):
         self.assertEqual(list(gui.load_groups())[-1], "Loop FX")
+
+
+class MpcColors(unittest.TestCase):
+    """Palette of the MPC's own pad colors and reading them from an .xpm saved by MPC 3.x."""
+
+    def mpc3_xpm(self, colors):
+        import gzip
+        pads = ",\n".join(f'                "value{i}": {c}' for i, c in enumerate(colors))
+        doc = ('ACVS\n3.9.1.2\nSerialisableProgramData\njson\nOSX\n{\n "data": {\n "programPads": {\n'
+               ' "universalPad": 65280,\n "pads": {\n' + pads + '\n }\n }\n }\n}\n')
+        path = Path(tempfile.mkdtemp()) / "Colors.xpm"
+        path.write_bytes(gzip.compress(doc.encode("utf-8")))
+        return path
+
+    def test_8bit_to_7bit_conversion(self):
+        self.assertEqual(kc.mpc3_color_to_classic(0xFF0000), 0x7F0000)
+        self.assertEqual(kc.mpc3_color_to_classic(0x00FF00), 0x007F00)
+        self.assertEqual(kc.mpc3_color_to_classic(0x0022FF), 0x00117F)
+        self.assertEqual(kc.mpc3_color_to_classic(0), 0)
+
+    def test_reads_gzip_json_xpm_and_skips_empty_pads(self):
+        path = self.mpc3_xpm([0xFF0000, 0x00FF00, 0xFF0000, 0, 0])
+        self.assertEqual(kc.read_color_file(path), [0x7F0000, 0x007F00])
+
+    def test_reads_classic_xpm_too(self):
+        path = Path(tempfile.mkdtemp()) / "k.xpm"
+        path.write_text(kc.set_pad_colors(kc.default_template(), {1: 0x7F0000, 2: 0x114F68}), encoding="utf-8")
+        self.assertEqual(kc.read_color_file(path), [0x7F0000, 0x114F68])
+
+    def test_default_palette_has_the_25_mpc_colors_all_in_range(self):
+        pal = gui.DEFAULT_PALETTE
+        self.assertEqual(len(pal), 26)                       # 25 MPC colors + the classic petrol
+        self.assertEqual(len({v for _, v, _ in pal}), 26)    # no duplicates
+        self.assertTrue(all(ok for _, _, ok in pal))
+        for _, v, _ in pal:
+            self.assertTrue(all(((v >> sh) & 0xFF) <= 0x7F for sh in (0, 8, 16)), hex(v))
+        self.assertEqual(pal[0][1], 0x7F0000)
+
+
+class StartFresh(unittest.TestCase):
+    def setUp(self):
+        self.old = gui.STATE_FILE
+        gui.STATE_FILE = Path(tempfile.mkdtemp()) / "state.json"
+
+    def tearDown(self):
+        gui.STATE_FILE = self.old
+
+    def test_previous_session_is_forgotten_but_language_is_kept(self):
+        gui.STATE_FILE.write_text(json.dumps({"lang": "es", "folders": [{"id": "a", "path": "/x"}],
+                                              "padmap": {"1": ["a"]}, "output": "/o"}))
+        gui.fresh_session()
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {"lang": "es"})
+
+    def test_works_without_a_previous_state_or_with_a_corrupt_one(self):
+        gui.fresh_session()
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {})
+        gui.STATE_FILE.write_text("{not json")
+        gui.fresh_session()
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {})
+
+    def test_presets_survive(self):
+        old = gui.PRESETS_FILE
+        gui.PRESETS_FILE = Path(tempfile.mkdtemp()) / "presets.json"
+        try:
+            gui.store_presets({"A": {"folders": [], "padmap": {}}})
+            gui.fresh_session()
+            self.assertIn("A", gui.load_presets())
+        finally:
+            gui.PRESETS_FILE = old
+
+
+class ScanApi(unittest.TestCase):
+    def test_scan_sees_files_added_after_the_first_scan(self):
+        tmp = Path(tempfile.mkdtemp())
+        make_wav(tmp / "S" / "a.wav")
+        self.assertEqual(len(kc.scan_folder(tmp / "S", True)), 1)
+        make_wav(tmp / "S" / "b.wav")
+        self.assertEqual(len(kc.scan_folder(tmp / "S", True)), 2)
+
+
+class DesktopApp(unittest.TestCase):
+    """The desktop shell with a fake pywebview (the real windows can't open in the test run)."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "desktop"))
+        import app
+        cls.app = app
+
+    class FakeWindow:
+        def __init__(self, result):
+            self.result, self.calls = result, []
+
+        def create_file_dialog(self, kind, **kw):
+            self.calls.append((kind, kw))
+            return self.result
+
+    class FakeWebview:
+        class FileDialog:
+            OPEN, FOLDER = "open", "folder"
+
+    def picker(self, result):
+        w = self.FakeWindow(result)
+        return self.app.make_picker(self.FakeWebview, lambda: w), w
+
+    def test_several_folders(self):
+        pick, w = self.picker(("/a/Kicks/", "/b/Snares"))
+        self.assertEqual(pick("folders", "en"), (["/a/Kicks", "/b/Snares"], None))
+        self.assertEqual(w.calls[0], ("folder", {"allow_multiple": True}))
+
+    def test_cancelled_dialogs(self):
+        pick, _ = self.picker(None)
+        self.assertEqual(pick("folders"), ([], None))
+        self.assertEqual(pick("folder"), (None, None))
+        self.assertEqual(pick("xpm"), (None, None))
+
+    def test_single_folder_and_xpm_file(self):
+        pick, w = self.picker(("C:\\Samples\\Pack\\",))
+        self.assertEqual(pick("out"), ("C:\\Samples\\Pack", None))
+        self.assertEqual(w.calls[0][0], "folder")
+        pick, w = self.picker(("/k/kit.xpm",))
+        self.assertEqual(pick("xpm"), ("/k/kit.xpm", None))
+        self.assertEqual(w.calls[0][0], "open")
+        self.assertIn("XPM files (*.xpm)", w.calls[0][1]["file_types"])
+
+    def test_older_pywebview_constants(self):
+        class Old:
+            FOLDER_DIALOG, OPEN_DIALOG = "F", "O"
+        w = self.FakeWindow(("/x",))
+        pick = self.app.make_picker(Old, lambda: w)
+        pick("folder")
+        self.assertEqual(w.calls[0][0], "F")
+
+    def test_gui_uses_the_installed_picker(self):
+        pick, _ = self.picker(("/z/Pack",))
+        gui.PICKER = pick
+        try:
+            self.assertEqual(gui.pick("folder", "es"), ("/z/Pack", None))
+        finally:
+            gui.PICKER = None

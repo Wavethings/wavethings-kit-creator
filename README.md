@@ -53,7 +53,19 @@ Needs Python 3.9+ (already on most Macs and Linux machines; on Windows, install 
 3. Your browser opens the app. Add folders, select one, click pads to assign it, choose an output folder and press
    **Generate kits**.
 
-### Make a double-clickable macOS app
+### Standalone app (macOS and Windows)
+Every release has two downloads built automatically on GitHub: **Wavethings-Kit-Creator-macOS.zip** (Apple Silicon)
+and **Wavethings-Kit-Creator-Windows.zip**. No Python and no browser needed: it opens in its own window with the
+system's folder pickers (on Windows they pick one folder at a time; use *Add subfolders of…* for many).
+- macOS: unzip, drag the app to Applications. It isn't signed by Apple, so the first time use right-click →
+  **Open** (or run `xattr -dr com.apple.quarantine "/Applications/Wavethings Kit Creator.app"`).
+- Windows: unzip and run `Wavethings Kit Creator.exe`. If SmartScreen warns, choose **More info → Run anyway**.
+  It needs Microsoft's WebView2, which comes with Windows 10/11.
+
+Each launch **starts from scratch**: choose a preset or add folders. Presets, keyword groups and colors are kept.
+To run or build it yourself: `pip install -r requirements-desktop.txt && python3 desktop/app.py`.
+
+### Make a double-clickable macOS app (needs Python)
     python3 build_app.py
 Drag the generated `Wavethings Kit Creator.app` to Applications. Closing the browser tab quits the app. Run
 `build_app.py` again after updating the scripts. Settings, presets, `keyword_groups.txt` and `group_colors.json` (see
@@ -71,8 +83,8 @@ computer's MPC library) and load the `.xpm` as a drum program.
 
 ## Known limits
 - Only a pad's first folder decides its color and mute group.
-- Colors marked "?" are estimates of the MPC palette. Use *Import colors from an .xpm* to calibrate them with a
-  program you colored on your MPC.
+- The color palette is the MPC's own 25 pad colors. Use *Import colors from an .xpm* to add others from a
+  program you colored on your MPC (classic format or the one saved by MPC 3.x).
 - Audio formats: `.wav`, `.aif`, `.aiff`.
 - Tested with the classic `.xpm` format (File_Version 2.1). Please report your MPC model and software version if
   something does not load.
@@ -128,7 +140,20 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 3. Se abre la app en el navegador. Añade carpetas, selecciona una, pulsa pads para asignarla, elige la carpeta de
    salida y pulsa **Generar kits**.
 
-### App de macOS con doble clic
+### App independiente (macOS y Windows)
+Cada release incluye dos descargas compiladas automáticamente en GitHub: **Wavethings-Kit-Creator-macOS.zip**
+(Apple Silicon) y **Wavethings-Kit-Creator-Windows.zip**. No necesitan Python ni navegador: se abre en su propia
+ventana con los selectores de carpetas del sistema (en Windows eligen una carpeta cada vez; usa *Añadir subcarpetas
+de…* para muchas).
+- macOS: descomprime y arrastra la app a Aplicaciones. Apple no la tiene firmada, así que la primera vez usa clic
+  derecho → **Abrir** (o ejecuta `xattr -dr com.apple.quarantine "/Applications/Wavethings Kit Creator.app"`).
+- Windows: descomprime y ejecuta `Wavethings Kit Creator.exe`. Si SmartScreen avisa, elige **Más información →
+  Ejecutar de todas formas**. Necesita WebView2 de Microsoft, que viene con Windows 10/11.
+
+Cada arranque **empieza desde cero**: elige un preset o añade carpetas. Los presets, los grupos de palabras clave y
+los colores se conservan. Para ejecutarla o compilarla tú: `pip install -r requirements-desktop.txt && python3 desktop/app.py`.
+
+### App de macOS con doble clic (necesita Python)
     python3 build_app.py
 Arrastra `Wavethings Kit Creator.app` a Aplicaciones. Al cerrar la pestaña del navegador la app se cierra sola. Vuelve
 a ejecutar `build_app.py` tras actualizar los scripts. La configuración, los presets, `keyword_groups.txt` y
@@ -146,8 +171,8 @@ biblioteca de MPC de tu ordenador) y carga el `.xpm` como programa de batería.
 
 ## Límites conocidos
 - Solo la primera carpeta de un pad decide su color y su grupo de choque.
-- Los colores marcados con "?" son estimaciones de la paleta de la MPC. Usa *Importar colores de un .xpm* para
-  calibrarlos con un programa que hayas coloreado en tu MPC.
+- La paleta de colores son los 25 colores de pad propios de la MPC. Usa *Importar colores de un .xpm* para añadir
+  otros desde un programa que hayas coloreado en tu MPC (formato clásico o el que guarda la MPC 3.x).
 - Formatos de audio: `.wav`, `.aif`, `.aiff`.
 - Probado con el formato `.xpm` clásico (File_Version 2.1). Si algo no carga, cuéntanos tu modelo de MPC y versión de
   software.

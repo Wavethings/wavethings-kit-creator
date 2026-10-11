@@ -3,6 +3,43 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.9.4] - 2026-10-11
+
+### Added
+- **Standalone desktop app for macOS (Apple Silicon) and Windows** (`desktop/app.py`): its own window
+  instead of a browser tab, no Python needed, with the system's native folder/file pickers. Built
+  on GitHub's macOS and Windows machines by `.github/workflows/build-apps.yml` and attached to every
+  release as `Wavethings-Kit-Creator-macOS.zip` / `Wavethings-Kit-Creator-Windows.zip`. The workflow
+  checks each built app before publishing it. `requirements-desktop.txt` lists what it needs.
+- **"↻ Rescan" button** next to the folder list.
+
+### Changed
+- **Every launch starts from scratch**: no folders or pad assignments from the previous session,
+  so you pick a preset or add folders. Only the language is remembered; presets, keyword groups
+  and colors are kept. Reloading the page during a session still keeps that session's work.
+- The color dot of keyword pads moved to the pad's top-right corner (it no longer squeezes the
+  group name) and has a white border with a dark outline, so it stands out on any pad color.
+- Questions and messages (preset name, confirmations) are now shown in the app's own dialogs
+  instead of the browser's, which don't work in every window.
+
+### Fixed
+- **Folders that stayed unread until the app was restarted**: folders are now scanned again
+  automatically when you come back to the window (and before generating), and the Rescan button
+  does it on demand. A scan that fails or finds an unmounted/slow drive empty is retried and no
+  longer breaks the page's start-up.
+
+## [1.9.3] - 2026-10-10
+
+### Changed
+- **The color palette is now the MPC's own**: the 25 pad colors taken from a real kit saved by the
+  MPC 3.x software (red, orange, amber, gold, lime, greens, cyan, blues, violet, magenta, pink…),
+  in the MPC's order, replacing the estimated colors. The MPC 3.x software stores 8-bit
+  channels and the classic `.xpm` format uses 7-bit ones, so each channel is halved (red
+  `0xFF0000` becomes `0x7F0000`, which matches the classic value). The petrol blue of the
+  classic MPC 2.x kits stays. No swatch is marked as estimated any more.
+- **"Import colors from an .xpm"** also reads `.xpm` files saved by the MPC 3.x software (a
+  compressed JSON document), not just the classic XML ones.
+
 ## [1.9.2] - 2026-10-10
 
 ### Added

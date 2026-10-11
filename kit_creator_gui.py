@@ -50,14 +50,21 @@ AUTOQUIT = bool(os.environ.get("KITCREATOR_AUTOQUIT")) or "--auto-quit" in sys.a
 SEEN = {"last": time.time(), "bye": 0.0}
 TOKEN = secrets.token_hex(16)
 
-# MPC pad colors: (R<<16)|(G<<8)|B, channels 0-127. Names are keys translated in the page.
-# "ok": True = value seen in a real .xpm; False = estimated (calibrate with "Import colors").
-DEFAULT_PALETTE = [
-    ("red", 0x7F0000, True), ("orange", 0x7F3300, True), ("yellow", 0x7F7F00, True),
-    ("green", 0x007F00, True), ("petrol", 0x114F68, True),
-    ("lime", 0x3F7F00, False), ("turquoise", 0x007F5F, False), ("cyan", 0x007F7F, False),
-    ("blue", 0x00007F, False), ("violet", 0x3F007F, False), ("magenta", 0x7F007F, False),
-    ("pink", 0x7F2A55, False), ("white", 0x7F7F7F, False), ("grey", 0x3F3F3F, False),
+# MPC pad colors: (R<<16)|(G<<8)|B with 7-bit channels (0-127), as the classic .xpm format stores
+# them. Names are keys translated in the page. The 25 colors below are the MPC's own pad colors
+# as saved by the MPC 3.x software (8-bit values, halved by kc.mpc3_color_to_classic), in the
+# order the MPC offers them; "petrol" was seen in a classic MPC 2.x kit.
+_MPC3_COLORS = [
+    ("red", 0xFF0000), ("orange", 0xFF6D17), ("red_orange", 0xFF4400), ("amber", 0xFF8800),
+    ("mustard", 0xECEC24), ("gold", 0xFFD500), ("chartreuse", 0xE6FF00), ("lime", 0xA2FF00),
+    ("light_green", 0x55FF00), ("green", 0x11FF00), ("spring", 0x00FF33), ("mint", 0x00FF80),
+    ("turquoise", 0x00FFC4), ("cyan", 0x00F7FF), ("sky", 0x00AAFF), ("azure", 0x0066FF),
+    ("grey", 0xA2A9AD), ("blue", 0x0022FF), ("indigo", 0x5200FF), ("violet", 0x6F00FF),
+    ("purple", 0xB200FF), ("magenta", 0xFF00FF), ("pink", 0xFF00BB), ("rose", 0xFF0077),
+    ("jade", 0x29B574),
+]
+DEFAULT_PALETTE = [(n, kc.mpc3_color_to_classic(v), True) for n, v in _MPC3_COLORS] + [
+    ("petrol", 0x114F68, True),
 ]
 JOB = {"log": [], "done": True, "error": None}
 
@@ -176,8 +183,31 @@ def palette():
     return pal
 
 
+PICKER = None   # set by the desktop app: a function (kind, lang) -> (path | list | None, error)
+
+
+def fresh_session():
+    """Forget the previous session: the page starts empty (no folders, no pad assignments), so the
+    person picks a preset or adds folders from scratch. Only the interface language is kept.
+    Presets, keyword groups and colors are untouched. Reloading the page during a session keeps
+    that session's own state, since this only runs when the app starts."""
+    keep = {}
+    try:
+        old = json.loads(STATE_FILE.read_text())
+        if isinstance(old, dict) and old.get("lang") in kc.MSG:
+            keep["lang"] = old["lang"]
+    except (OSError, ValueError):
+        pass
+    try:
+        STATE_FILE.write_text(json.dumps(keep, indent=1))
+    except OSError:
+        pass
+
+
 def pick(kind, lang="en"):
-    """Native macOS dialog. Returns (path or list of paths, error)."""
+    """Native dialog. Returns (path or list of paths, error)."""
+    if PICKER is not None:
+        return PICKER(kind, lang)
     if sys.platform != "darwin":
         return None, "nodialog"
     prompts = PROMPTS.get(lang, PROMPTS["en"])
@@ -349,7 +379,16 @@ class H(BaseHTTPRequestHandler):
             return self.send({"paths": subs})
         if self.path == "/api/scan":
             d = Path(data["path"]).expanduser()
-            files = kc.scan_folder(d, True if data.get("pack") else data.get("recursive", True)) if d.is_dir() else []
+            rec = True if data.get("pack") else data.get("recursive", True)
+            files = []
+            for attempt in range(3):     # a drive that is still waking up can list empty at first
+                try:
+                    files = kc.scan_folder(d, rec) if d.is_dir() else []
+                except OSError:
+                    files = []
+                if files or not d.is_dir():
+                    break
+                time.sleep(0.4)
             keys = {k: len(v) for k, v in kc.index_by_key(files).items()} if files else {}
             counts = {}
             if data.get("pack") and files:     # how many samples each keyword group would find
@@ -358,8 +397,8 @@ class H(BaseHTTPRequestHandler):
                               "groupCounts": counts})
         if self.path == "/api/import_colors":
             try:
-                vals = kc.read_pad_colors(Path(data["path"]).expanduser().read_text(encoding="utf-8"))
-            except OSError as e:
+                vals = kc.read_color_file(Path(data["path"]).expanduser())
+            except (OSError, ValueError, EOFError) as e:
                 return self.send({"error": str(e)})
             try:
                 cur = json.loads(PAL_FILE.read_text())
@@ -404,12 +443,16 @@ button:disabled{opacity:.5}input[type=text],input[type=number]{background:#17181
 .dot{width:26px;height:26px;border-radius:50%;border:2px solid #fff3;flex:none;cursor:pointer}
 .tabs{display:flex;gap:4px;margin-bottom:10px}.tabs button{flex:1;padding:5px 0}.tabs .sel{background:var(--ac);border-color:var(--ac)}
 .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.pad{aspect-ratio:1;min-width:0;min-height:0;overflow:hidden;border-radius:8px;border:1px solid #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#2e3035;cursor:pointer;color:#fffc;font-weight:600;user-select:none}
+.pad{position:relative;aspect-ratio:1;min-width:0;min-height:0;overflow:hidden;border-radius:8px;border:1px solid #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#2e3035;cursor:pointer;color:#fffc;font-weight:600;user-select:none}
 .pad small{width:100%;box-sizing:border-box;padding:0 4px;font-weight:400;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
 .pad select{width:92%;max-width:92%;font-size:10px;padding:1px 2px;border-radius:4px;border:1px solid #0003;background:#17181b;color:#fff;cursor:pointer}
 .padkw{display:flex;align-items:center;justify-content:center;gap:3px;width:100%}
 .padkw select{flex:1;min-width:0}
-.padcolor{width:9px;height:9px;border-radius:50%;flex:none;cursor:pointer;border:1px solid #fff8}
+.padtools{position:absolute;top:3px;right:3px;display:flex;gap:3px}
+.padcolor{width:14px;height:14px;border-radius:50%;flex:none;cursor:pointer;box-sizing:border-box;border:2px solid #fff;box-shadow:0 0 0 1px #000c}
+#dlg{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:30}
+#dlg>div{background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:16px;width:min(420px,90vw)}
+#dlgMsg{margin:0 0 12px;white-space:pre-wrap;line-height:1.4}#dlg input{margin-bottom:12px}
 .packchk{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--mu);flex:none;white-space:nowrap}
 .pad:hover{outline:2px solid #fff6}.hint{color:var(--mu);font-size:12px;margin-top:8px}
 .chk{display:flex;gap:6px;align-items:center;margin:4px 0;color:var(--mu)}
@@ -432,7 +475,7 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
  </section>
  <section><h2 data-i18n="sec_folders"></h2>
   <div id="folders"></div>
-  <div class="row" style="margin:0"><button onclick="addFolder()" data-i18n="btn_add"></button><button onclick="addSubfolders()" data-i18n="btn_addsub" data-title="title_addsub"></button><button id="btnClear" onclick="clearFolders()" style="margin-left:auto" data-i18n="btn_clear" data-title="title_clear"></button></div>
+  <div class="row" style="margin:0"><button onclick="addFolder()" data-i18n="btn_add"></button><button onclick="addSubfolders()" data-i18n="btn_addsub" data-title="title_addsub"></button><button id="btnRescan" onclick="rescanAll(true)" style="margin-left:auto" data-i18n="btn_rescan" data-title="title_rescan"></button><button id="btnClear" onclick="clearFolders()" data-i18n="btn_clear" data-title="title_clear"></button></div>
   <div class="hint" data-i18n="hint_folders"></div>
   <div class="row" style="margin-top:4px"><span id="groupsInfo" class="hint" style="margin:0"></span><button onclick="editGroupsFile()" data-title="title_editgroups" data-i18n="btn_editgroups"></button></div>
  </section>
@@ -468,6 +511,7 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
 </div>
 </main>
 <footer><span data-i18n="footer"></span> · v__VERSION__</footer>
+<div id="dlg"><div><p id="dlgMsg"></p><input type="text" id="dlgIn"><div class="row" style="justify-content:flex-end;margin:0"><button id="dlgNo"></button><button class="pri" id="dlgOk"></button></div></div></div>
 <div id="pal" onclick="if(event.target===this)this.style.display='none'"><div>
  <b id="palTitle"></b><div class="sw" id="sw"></div>
  <div class="row"><button id="btnNocolor" onclick="setColor(0)"></button><button id="btnImport" onclick="importColors()" data-i18n="btn_import"></button></div>
@@ -481,7 +525,7 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  preset_name:"Preset name:",preset_overwrite:"A preset called “{0}” already exists. Overwrite it?",preset_saved:"Preset “{0}” saved",
  preset_load_confirm:"Replace the current folders and pad assignments with preset “{0}”?",preset_loaded:"Preset “{0}” loaded",
  preset_missing:" · {0} folder(s) not found (is a drive disconnected?)",preset_delete_confirm:"Delete preset “{0}”?",preset_need_folders:"Add at least one folder first",
- hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · Open source (MIT License)",sec_folders:"Sample folders",btn_add:"＋ Add folders",btn_addsub:"＋ Add subfolders of…",btn_clear:"Clear all",title_clear:"Remove every folder and its pad assignments",confirm_clear:"Remove all {0} folders and their pad assignments?",cleared:"All folders removed",
+ hdr_sub:"· .xpm drum kit generator for MPC",footer:"© 2026 Wavethings · Open source (MIT License)",sec_folders:"Sample folders",btn_rescan:"↻ Rescan",title_rescan:"Read the folders again (also happens automatically when you come back to this window)",rescanned:"{0} folder(s) rescanned",dlg_ok:"OK",dlg_cancel:"Cancel",btn_add:"＋ Add folders",btn_addsub:"＋ Add subfolders of…",btn_clear:"Clear all",title_clear:"Remove every folder and its pad assignments",confirm_clear:"Remove all {0} folders and their pad assignments?",cleared:"All folders removed",
  title_addsub:"Adds each subfolder of a parent folder as a separate folder",
  hint_folders:"1) Add folders (⌘-click to pick several, or a parent folder to add all its subfolders) · 2) select one · 3) click the pads on the right to assign it. The folder's color is applied to its pads on the MPC. “Choke” = mute group: pads of folders with the same number cut each other off (e.g. closed and open hi-hat).",
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
@@ -507,19 +551,19 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  group_color_title:"Set a color for every pad using “{0}”",
  btn_editgroups:"✎ Edit keyword groups",title_editgroups:"Opens keyword_groups.txt in a text editor (TextEdit on macOS)",
  groups_count:"{0} keyword group(s) loaded",
- hint_pal:"Swatches marked “?” are estimated values. If the color looks different on your MPC, import an .xpm where you painted pads with the MPC's colors and they will be added with their exact values.",
+ hint_pal:"These are the MPC's own pad colors. If you need one that isn't here, import an .xpm where you painted pads with it (classic format or the one saved by MPC 3.x) and it will be added.",
  not_found:"⚠ folder not found",n_samples:"{0} samples",pads_lbl:"pads",none:"none",chg_color:"Change color",mute_grp:"Mute group",
  nochoke:"No choke",choke:"Choke {0}",no_folders:"No folders yet.",tpl_builtin:"Built-in (128 empty pads)",not_chosen:"(not chosen)",
  pick_first:"Select a folder first",added:"{0} folder(s) added",added_sub:"{0} subfolder(s) added",skipped:" ({0} skipped: empty or already added)",
  copied:"Bank {0} copied to {1}",need_out:"Missing output folder",need_pads:"Assign a folder to at least one pad",generating:"Generating…",done:"✔ Done",
  busy:"A generation is already running",found:"{0} colors found in the file.",ask_path:"Full path:",ask_paths:"Folder paths separated by ;",
- "col.red":"Red","col.orange":"Orange","col.yellow":"Yellow","col.green":"Green","col.petrol":"Petrol blue","col.lime":"Lime","col.turquoise":"Turquoise","col.cyan":"Cyan","col.blue":"Blue","col.violet":"Violet","col.magenta":"Magenta","col.pink":"Pink","col.white":"White","col.grey":"Grey","col.imported":"Imported"},
+ "col.red_orange":"Red-orange","col.amber":"Amber","col.mustard":"Mustard","col.gold":"Gold","col.chartreuse":"Chartreuse","col.light_green":"Light green","col.spring":"Spring green","col.mint":"Mint","col.sky":"Sky blue","col.azure":"Azure","col.indigo":"Indigo","col.purple":"Purple","col.rose":"Rose","col.jade":"Jade","col.red":"Red","col.orange":"Orange","col.yellow":"Yellow","col.green":"Green","col.petrol":"Petrol blue","col.lime":"Lime","col.turquoise":"Turquoise","col.cyan":"Cyan","col.blue":"Blue","col.violet":"Violet","col.magenta":"Magenta","col.pink":"Pink","col.white":"White","col.grey":"Grey","col.imported":"Imported"},
 es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Borrar",preset_none:"(aún no hay presets)",preset_choose:"Elige un preset…",
  hint_presets:"Un preset recuerda tus carpetas, asignaciones de pads, grupos de choque y colores. Las rutas se guardan tal como están en este equipo.",
  preset_name:"Nombre del preset:",preset_overwrite:"Ya existe un preset llamado «{0}». ¿Sobrescribirlo?",preset_saved:"Preset «{0}» guardado",
  preset_load_confirm:"¿Reemplazar las carpetas y asignaciones actuales por el preset «{0}»?",preset_loaded:"Preset «{0}» cargado",
  preset_missing:" · {0} carpeta(s) no encontrada(s) (¿hay un disco desconectado?)",preset_delete_confirm:"¿Borrar el preset «{0}»?",preset_need_folders:"Añade primero alguna carpeta",
- hdr_sub:"· generador de kits .xpm para MPC",footer:"© 2026 Wavethings · Código abierto (Licencia MIT)",sec_folders:"Carpetas de samples",btn_add:"＋ Añadir carpetas",btn_addsub:"＋ Añadir subcarpetas de…",btn_clear:"Quitar todas",title_clear:"Quita todas las carpetas y sus asignaciones de pads",confirm_clear:"¿Quitar las {0} carpetas y sus asignaciones de pads?",cleared:"Carpetas quitadas",
+ hdr_sub:"· generador de kits .xpm para MPC",footer:"© 2026 Wavethings · Código abierto (Licencia MIT)",sec_folders:"Carpetas de samples",btn_rescan:"↻ Reescanear",title_rescan:"Vuelve a leer las carpetas (también ocurre solo al volver a esta ventana)",rescanned:"{0} carpeta(s) reescaneadas",dlg_ok:"Aceptar",dlg_cancel:"Cancelar",btn_add:"＋ Añadir carpetas",btn_addsub:"＋ Añadir subcarpetas de…",btn_clear:"Quitar todas",title_clear:"Quita todas las carpetas y sus asignaciones de pads",confirm_clear:"¿Quitar las {0} carpetas y sus asignaciones de pads?",cleared:"Carpetas quitadas",
  title_addsub:"Añade cada subcarpeta de una carpeta madre como carpeta independiente",
  hint_folders:"1) Añade carpetas (⌘-clic para elegir varias, o una carpeta madre para añadir todas sus subcarpetas) · 2) selecciona una · 3) pulsa los pads de la derecha para asignársela. El color de la carpeta se aplica a sus pads en la MPC. “Choke” = grupo de choque: los pads de carpetas con el mismo número se cortan entre sí (p. ej. hi-hat cerrado y abierto).",
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
@@ -545,13 +589,13 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  group_color_title:"Fija un color para todos los pads que usan «{0}»",
  btn_editgroups:"✎ Editar grupos de palabras clave",title_editgroups:"Abre keyword_groups.txt en un editor de texto (TextEdit en macOS)",
  groups_count:"{0} grupo(s) de palabras clave cargados",
- hint_pal:"Las casillas con “?” son valores estimados. Si en la MPC ves un color distinto, importa un .xpm donde hayas pintado pads con los colores de la MPC y se añadirán con sus valores exactos.",
+ hint_pal:"Estos son los colores de pad propios de la MPC. Si necesitas otro que no esté, importa un .xpm donde hayas pintado pads con él (formato clásico o el que guarda la MPC 3.x) y se añadirá.",
  not_found:"⚠ carpeta no encontrada",n_samples:"{0} samples",pads_lbl:"pads",none:"ninguno",chg_color:"Cambiar color",mute_grp:"Grupo de choque",
  nochoke:"Sin choke",choke:"Choke {0}",no_folders:"Aún no hay carpetas.",tpl_builtin:"Integrada (128 pads vacíos)",not_chosen:"(sin elegir)",
  pick_first:"Selecciona primero una carpeta",added:"{0} carpeta(s) añadida(s)",added_sub:"{0} subcarpeta(s) añadida(s)",skipped:" ({0} omitidas: vacías o ya añadidas)",
  copied:"Banco {0} copiado a {1}",need_out:"Falta la carpeta de salida",need_pads:"Asigna alguna carpeta a algún pad",generating:"Generando…",done:"✔ Terminado",
  busy:"Ya hay una generación en curso",found:"{0} colores encontrados en el archivo.",ask_path:"Ruta completa:",ask_paths:"Rutas de carpetas separadas por ;",
- "col.red":"Rojo","col.orange":"Naranja","col.yellow":"Amarillo","col.green":"Verde","col.petrol":"Azul petróleo","col.lime":"Lima","col.turquoise":"Turquesa","col.cyan":"Cian","col.blue":"Azul","col.violet":"Violeta","col.magenta":"Magenta","col.pink":"Rosa","col.white":"Blanco","col.grey":"Gris","col.imported":"Importado"}};
+ "col.red_orange":"Rojo anaranjado","col.amber":"Ámbar","col.mustard":"Mostaza","col.gold":"Dorado","col.chartreuse":"Chartreuse","col.light_green":"Verde claro","col.spring":"Verde primavera","col.mint":"Menta","col.sky":"Azul cielo","col.azure":"Azur","col.indigo":"Índigo","col.purple":"Púrpura","col.rose":"Rosa fuerte","col.jade":"Jade","col.red":"Rojo","col.orange":"Naranja","col.yellow":"Amarillo","col.green":"Verde","col.petrol":"Azul petróleo","col.lime":"Lima","col.turquoise":"Turquesa","col.cyan":"Cian","col.blue":"Azul","col.violet":"Violeta","col.magenta":"Magenta","col.pink":"Rosa","col.white":"Blanco","col.grey":"Gris","col.imported":"Importado"}};
 let LANG="en";
 const t=(k,...a)=>{let s=(I18N[LANG]&&I18N[LANG][k])??I18N.en[k]??k;a.forEach((v,i)=>s=s.split("{"+i+"}").join(v));return s};
 function applyStatic(){
@@ -573,7 +617,16 @@ const entryId=e=>typeof e==="string"?e:e.id;
 const entryGroup=e=>typeof e==="string"?null:(e.group||null);
 function folderPads(id){return Object.keys(S.padmap).filter(p=>(S.padmap[p]||[]).some(e=>entryId(e)===id)).map(Number).sort((a,b)=>a-b)}
 function rangeText(a){const o=[];for(let i=0;i<a.length;){let j=i;while(a[j+1]===a[j]+1)j++;o.push(j>i+1?a[i]+"-"+a[j]:a.slice(i,j+1).join(", "));i=j+1}return o.join(", ")}
-async function pathFrom(kind){const r=await api("/api/pick",{kind,lang:LANG});if(r.error==="nodialog"){return prompt(t("ask_path"))||null}return r.path}
+function dlg(msg,o){o=o||{};return new Promise(res=>{
+  const d=$("dlg"),i=$("dlgIn");$("dlgMsg").textContent=msg;i.style.display=o.input?"":"none";i.value=o.def||"";
+  $("dlgNo").style.display=o.cancel===false?"none":"";$("dlgOk").textContent=t("dlg_ok");$("dlgNo").textContent=t("dlg_cancel");
+  const done=v=>{d.style.display="none";document.removeEventListener("keydown",key,true);res(v)};
+  const key=e=>{if(e.key==="Escape"){e.preventDefault();done(o.input?null:false)}else if(e.key==="Enter"){e.preventDefault();done(o.input?i.value:true)}};
+  document.addEventListener("keydown",key,true);
+  $("dlgOk").onclick=()=>done(o.input?i.value:true);$("dlgNo").onclick=()=>done(o.input?null:false);
+  d.style.display="flex";if(o.input){i.focus();i.select()}else $("dlgOk").focus()})}
+const uiConfirm=m=>dlg(m),uiPrompt=(m,d)=>dlg(m,{input:true,def:d}),uiAlert=m=>dlg(m,{cancel:false});
+async function pathFrom(kind){const r=await api("/api/pick",{kind,lang:LANG});if(r.error==="nodialog"){return(await uiPrompt(t("ask_path")))||null}return r.path}
 async function pickTo(key,kind){const p=await pathFrom(kind);if(p){S[key]=p;render();save()}}
 async function addPaths(paths,skipEmpty){
   const have=new Set(S.folders.map(f=>f.path));let added=0,first=null;
@@ -586,35 +639,45 @@ async function addPaths(paths,skipEmpty){
   if(first)active=first;render();save();return added}
 async function addFolder(){
   const r=await api("/api/pick",{kind:"folders",lang:LANG});
-  const ps=r.error==="nodialog"?(prompt(t("ask_paths"))||"").split(";").map(x=>x.trim()).filter(Boolean):(r.path||[]);
+  const ps=r.error==="nodialog"?((await uiPrompt(t("ask_paths")))||"").split(";").map(x=>x.trim()).filter(Boolean):(r.path||[]);
   if(ps.length){const n=await addPaths(ps);$("msg").textContent=t("added",n)}}
 async function addSubfolders(){
   const p=await pathFrom("folder");if(!p)return;
   const r=await api("/api/subfolders",{path:p});const n=await addPaths(r.paths,true);
   $("msg").textContent=t("added_sub",n)+(r.paths.length>n?t("skipped",r.paths.length-n):"")}
-function clearFolders(){
-  if(!S.folders.length||!confirm(t("confirm_clear",S.folders.length)))return;
+async function clearFolders(){
+  if(!S.folders.length||!(await uiConfirm(t("confirm_clear",S.folders.length))))return;
   S.folders=[];S.padmap={};active=null;$("msg").textContent=t("cleared");render();save()}
 async function savePreset(){
   if(!S.folders.length){$("msg").textContent=t("preset_need_folders");return}
-  const name=(prompt(t("preset_name"),S.preset||"")||"").trim().slice(0,60);if(!name)return;
-  if(PRESETS[name]&&!confirm(t("preset_overwrite",name)))return;
+  const name=((await uiPrompt(t("preset_name"),S.preset||""))||"").trim().slice(0,60);if(!name)return;
+  if(PRESETS[name]&&!(await uiConfirm(t("preset_overwrite",name))))return;
   const preset={folders:S.folders.map(f=>({id:f.id,path:f.path,color:f.color||0,mute:f.mute||0})),padmap:S.padmap};
   const r=await api("/api/presets",{action:"save",name,preset});if(r.error)return;
   PRESETS=r.presets;S.preset=name;$("msg").textContent=t("preset_saved",name);render();save()}
 async function loadPreset(){
   const name=$("presetSel").value,p=PRESETS[name];if(!p)return;
-  if(S.folders.length&&!confirm(t("preset_load_confirm",name)))return;
+  if(S.folders.length&&!(await uiConfirm(t("preset_load_confirm",name))))return;
   S.folders=p.folders.map(f=>({...f,count:0}));S.padmap=JSON.parse(JSON.stringify(p.padmap));
   active=S.folders.length?S.folders[0].id:null;S.preset=name;
   for(const f of S.folders)await scan(f);
   const missing=S.folders.filter(f=>f.count<0).length;
   $("msg").textContent=t("preset_loaded",name)+(missing?t("preset_missing",missing):"");render();save()}
 async function deletePreset(){
-  const name=$("presetSel").value;if(!PRESETS[name]||!confirm(t("preset_delete_confirm",name)))return;
+  const name=$("presetSel").value;if(!PRESETS[name]||!(await uiConfirm(t("preset_delete_confirm",name))))return;
   const r=await api("/api/presets",{action:"delete",name});if(r.error)return;
   PRESETS=r.presets;if(S.preset===name)S.preset="";render();save()}
-async function scan(f){const r=await api("/api/scan",{path:f.path,recursive:S.recursive||f.pack,pack:!!f.pack});f.count=r.count;f.keys=r.keys||{};f.groupCounts=r.groupCounts||{}}
+async function scan(f){
+  try{const r=await api("/api/scan",{path:f.path,recursive:S.recursive||f.pack,pack:!!f.pack});
+    f.count=typeof r.count==="number"?r.count:-1;f.keys=r.keys||{};f.groupCounts=r.groupCounts||{}}
+  catch(e){f.count=-1;f.keys={};f.groupCounts={}}}
+let lastScan=Date.now(),scanning=false;
+async function rescanAll(manual){
+  if(scanning)return;scanning=true;
+  try{for(const f of S.folders)await scan(f);lastScan=Date.now();render();if(manual)$("msg").textContent=t("rescanned",S.folders.length)}
+  finally{scanning=false}}
+addEventListener("focus",()=>{if(Date.now()-lastScan>15000)rescanAll()});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastScan>15000)rescanAll()});
 const KEY_ORDER=["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 const keySort=(a,b)=>{const ba=a.replace("m",""),bb=b.replace("m","");return KEY_ORDER.indexOf(ba)-KEY_ORDER.indexOf(bb)||a.length-b.length};
 function allKeys(){const s=new Set();for(const f of S.folders)for(const k in (f.keys||{}))s.add(k);return[...s].sort(keySort)}
@@ -655,10 +718,10 @@ async function setColor(v){
   else{const f=S.folders.find(x=>x.id===palFor);if(f)f.color=v}
   $("pal").style.display="none";render();save()}
 async function importColors(){const p=await pathFrom("xpm");if(!p)return;const r=await api("/api/import_colors",{path:p});
-  if(r.error){alert(r.error);return}PAL=r.palette;alert(t("found",r.found));openPal(palFor)}
-async function editGroupsFile(){const r=await api("/api/edit_groups",{});if(r.error)alert(r.error)}
+  if(r.error){await uiAlert(r.error);return}PAL=r.palette;await uiAlert(t("found",r.found));openPal(palFor)}
+async function editGroupsFile(){const r=await api("/api/edit_groups",{});if(r.error)await uiAlert(r.error)}
 function render(){
-  $("lang").value=LANG;$("btnClear").disabled=!S.folders.length;
+  $("lang").value=LANG;$("btnClear").disabled=$("btnRescan").disabled=!S.folders.length;
   $("groupsInfo").textContent=t("groups_count",GROUPNAMES.length);
   const pn=Object.keys(PRESETS).sort((a,b)=>a.localeCompare(b));
   $("presetSel").innerHTML=pn.length?`<option value="">${esc(t("preset_choose"))}</option>`+pn.map(n=>`<option value="${esc(n)}" ${n===S.preset?"selected":""}>${esc(n)}</option>`).join(""):`<option value="">${esc(t("preset_none"))}</option>`;
@@ -680,9 +743,10 @@ function render(){
    const titleTxt=pairs.map(({e,f})=>f.path.split(/[\\/]/).pop()+(f.pack?` (🔑 ${entryGroup(e)||t("kw_whole")})`:"")).join(" + ");
    const body=pairs.map(({e,f})=>{
      if(!f.pack)return `<small>${esc(f.path.split(/[\\/]/).pop())}</small>`;
-     const g=entryGroup(e),dot=g?`<span class="padcolor" style="background:${css(entryColor(e,f))}" onclick="event.stopPropagation();openPalGroup('${jsq(g)}')" title="${esc(t('group_color_title',g))}"></span>`:"";
-     return `<div class="padkw">${dot}<select onclick="event.stopPropagation()" onchange="setGroup(${n},'${f.id}',this.value)">${groupOpts(g,f)}</select></div>`}).join("");
-   h+=`<div class="pad" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span>${n}</span>${body}</div>`}
+     return `<div class="padkw"><select onclick="event.stopPropagation()" onchange="setGroup(${n},'${f.id}',this.value)">${groupOpts(entryGroup(e),f)}</select></div>`}).join("");
+   const dots=pairs.filter(({e,f})=>f.pack&&entryGroup(e)).map(({e,f})=>{const g=entryGroup(e);
+     return `<span class="padcolor" style="background:${css(entryColor(e,f))}" onclick="event.stopPropagation();openPalGroup('${jsq(g)}')" title="${esc(t('group_color_title',g))}"></span>`}).join("");
+   h+=`<div class="pad" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span>${n}</span>${body}${dots?`<div class="padtools">${dots}</div>`:""}</div>`}
   $("pads").innerHTML=h;
   const ct=[...Array(8).keys()].filter(b=>b!==bank);if(copyTarget!=="all"&&+copyTarget===bank)copyTarget="all";
   $("copyTo").innerHTML=`<option value="all">${t("opt_all")}</option>`+ct.map(b=>`<option value="${b}">${t("bank",BANKS[b])}</option>`).join("");$("copyTo").value=copyTarget;
@@ -704,7 +768,7 @@ async function generate(){
   const m=$("msg");m.className="";
   if(!S.output)return m.textContent=t("need_out");
   if(!Object.keys(S.padmap).length)return m.textContent=t("need_pads");
-  $("go").disabled=true;m.textContent=t("generating");$("log").style.display="block";
+  $("go").disabled=true;m.textContent=t("generating");$("log").style.display="block";rescanAll();
   const r=await api("/api/generate",S);if(r.error){m.textContent=r.error==="busy"?t("busy"):r.error;$("go").disabled=false;return}
   const iv=setInterval(async()=>{const j=await api("/api/job");$("log").textContent=j.log.join("\n");$("log").scrollTop=1e9;
    if(j.done){clearInterval(iv);$("go").disabled=false;if(j.error){m.className="err";m.textContent=j.error}else m.textContent=t("done")}},400)}
@@ -713,7 +777,7 @@ addEventListener("pagehide",()=>navigator.sendBeacon("/api/bye?t="+TOKEN));
 (async()=>{const r=await api("/api/state");PAL=r.palette;PRESETS=r.presets||{};GROUPS=r.keywordGroups||{};GROUPNAMES=Object.keys(GROUPS);GROUPCOLORS=r.groupColors||{};MAC=r.mac;if(r.state)Object.assign(S,r.state);for(const p in S.padmap)if(!Array.isArray(S.padmap[p]))S.padmap[p]=[S.padmap[p]];
   for(const f of S.folders)if(f.pack===undefined)f.pack=false;
   LANG=S.lang&&I18N[S.lang]?S.lang:((navigator.language||"en").toLowerCase().startsWith("es")?"es":"en");S.lang=LANG;
-  for(const f of S.folders)await scan(f);active=S.folders.length?S.folders[0].id:null;applyStatic();render()})();
+  for(const f of S.folders)await scan(f);lastScan=Date.now();active=S.folders.length?S.folders[0].id:null;applyStatic();render()})();
 </script></html>'''
 
 
@@ -743,6 +807,7 @@ def start_server():
 
 
 def main():
+    fresh_session()
     server, url = start_server()
     print(srv("up", url=url))
     threading.Timer(0.5, lambda: webbrowser.open(url)).start()

@@ -16,11 +16,11 @@ Pads: 1-16 = Bank A, 17-32 = Bank B ... up to 128 (same numbering as the MPC).
 A pad can take several folders (repeat --pad 1=...) and ranges are allowed (--pad 1-4=...).
 The interface language follows your system locale; force it with --lang en|es.
 """
-import argparse, filecmp, json, os, random, re, shutil, sys
+import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.9.2"
+__version__ = "1.9.4"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -279,6 +279,38 @@ def read_pad_colors(text):
         v = int(vm.group(3))
         if v and v not in seen:
             seen.append(v)
+    return seen
+
+
+def mpc3_color_to_classic(v):
+    """The MPC 3.x software stores a pad color with 8-bit channels, (R<<16)|(G<<8)|B (red is
+    0xFF0000); the classic .xpm format this tool writes uses 7-bit channels (red is 0x7F0000).
+    Halving each channel converts one to the other."""
+    return ((v >> 17 & 0x7F) << 16) | ((v >> 9 & 0x7F) << 8) | (v >> 1 & 0x7F)
+
+
+_MPC3_PADS_RE = re.compile(r'"pads"\s*:\s*\{(.*?)\}', re.S)
+_MPC3_VALUE_RE = re.compile(r'"value\d+"\s*:\s*(\d+)')
+
+
+def read_color_file(path):
+    """Distinct non-zero pad colors (as classic 7-bit values) found in an .xpm of either kind:
+    the classic XML format, or the newer one the MPC 3.x software saves (a gzip-compressed JSON
+    document whose pad colors have 8-bit channels)."""
+    raw = Path(path).read_bytes()
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    text = raw.decode("utf-8", errors="replace")
+    m = _MPC3_PADS_RE.search(text) if '"programPads"' in text else None
+    if not m:
+        return read_pad_colors(text)
+    seen = []
+    for vm in _MPC3_VALUE_RE.finditer(m.group(1)):
+        v = int(vm.group(1))
+        if v:
+            v = mpc3_color_to_classic(v)
+            if v and v not in seen:
+                seen.append(v)
     return seen
 
 
