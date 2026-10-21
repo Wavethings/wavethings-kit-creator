@@ -102,6 +102,48 @@ def store_presets(d):
     os.replace(tmp, PRESETS_FILE)
 
 
+THEMES = ("dark", "light", "mpc")
+
+
+def groups_header():
+    """The comment lines at the top of the default groups file (they document the syntax)."""
+    out = []
+    for line in kc.DEFAULT_KEYWORD_GROUPS_TEXT.splitlines():
+        if line.startswith("#") or not line.strip():
+            out.append(line)
+        else:
+            break
+    return "\n".join(out).rstrip() + "\n\n"
+
+
+def save_groups(items):
+    """Writes the keyword-groups file from the in-app editor. `items` = [{"name", "keywords"}].
+    Returns (groups dict, error key or None). Names must be unique and cannot contain ':'."""
+    groups = {}
+    for it in items:
+        name = str(it.get("name", "")).strip()
+        kws = it.get("keywords", [])
+        if isinstance(kws, str):
+            kws = kws.split(",")
+        kws = [str(k).strip() for k in kws if str(k).strip()]
+        if not name and not kws:
+            continue                      # an empty row is just dropped
+        if not name or ":" in name or name.startswith("#"):
+            return None, "bad_name"
+        if name.lower() in {n.lower() for n in groups}:
+            return None, "dup_name"
+        if not kws:
+            return None, "no_keywords"
+        groups[name] = kws
+    if not groups:
+        return None, "no_groups"
+    text = groups_header() + "\n".join(f"{n}: {', '.join(k)}" for n, k in groups.items()) + "\n"
+    tmp = GROUPS_FILE.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, GROUPS_FILE)
+    return groups, None
+
+
 def load_groups():
     """Reads the person's keyword-groups file (an ordered {name: [keywords]} dict), creating
     it with the built-in starting groups the first time it's needed. Re-read fresh on every
@@ -196,6 +238,8 @@ def fresh_session():
         old = json.loads(STATE_FILE.read_text())
         if isinstance(old, dict) and old.get("lang") in kc.MSG:
             keep["lang"] = old["lang"]
+        if isinstance(old, dict) and old.get("theme") in THEMES:
+            keep["theme"] = old["theme"]
     except (OSError, ValueError):
         pass
     try:
@@ -365,6 +409,31 @@ class H(BaseHTTPRequestHandler):
                 colors.pop(name, None)   # 0 / missing = no override, use the folder's color
             store_group_colors(colors)
             return self.send({"groupColors": colors})
+        if self.path == "/api/groups":
+            action = data.get("action")
+            if action == "reset":
+                if GROUPS_FILE.is_file():
+                    shutil.copy2(GROUPS_FILE, GROUPS_FILE.with_name(GROUPS_FILE.name + ".bak"))
+                GROUPS_FILE.write_text(kc.DEFAULT_KEYWORD_GROUPS_TEXT, encoding="utf-8")
+            elif action == "save":
+                groups, err = save_groups(data.get("groups") or [])
+                if err:
+                    return self.send({"error": err})
+                colors = load_group_colors()      # a renamed group keeps its color
+                renames = data.get("renames") or {}
+                changed = False
+                for old, new in renames.items():
+                    if old in colors and new in groups and old != new:
+                        colors[new] = colors.pop(old)
+                        changed = True
+                for name in [n for n in colors if n not in groups]:
+                    colors.pop(name)              # a deleted group's color is dropped
+                    changed = True
+                if changed:
+                    store_group_colors(colors)
+            elif action != "get":
+                return self.send({"error": "invalid"})
+            return self.send({"groups": load_groups(), "groupColors": load_group_colors()})
         if self.path == "/api/edit_groups":
             load_groups()      # make sure the file exists with real content before opening it
             try:
@@ -392,7 +461,11 @@ class H(BaseHTTPRequestHandler):
             keys = {k: len(v) for k, v in kc.index_by_key(files).items()} if files else {}
             counts = {}
             if data.get("pack") and files:     # how many samples each keyword group would find
-                counts = kc.group_match_counts(d, files, load_groups())
+                draft = data.get("groups")     # the in-app editor asks about groups it hasn't saved yet
+                if isinstance(draft, dict) and draft:
+                    draft = {str(k): [str(w).strip() for w in v if str(w).strip()]
+                             for k, v in draft.items() if isinstance(v, list)}
+                counts = kc.group_match_counts(d, files, draft or load_groups())
             return self.send({"count": len(files) if d.is_dir() else -1, "keys": keys,
                               "groupCounts": counts})
         if self.path == "/api/import_colors":
@@ -421,52 +494,92 @@ class H(BaseHTTPRequestHandler):
 PAGE = r'''<!doctype html><html lang="en"><meta charset="utf-8"><title>Wavethings Kit Creator</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#1b1c1f;--pn:#26282c;--ln:#383b41;--tx:#e6e7ea;--mu:#9a9fa8;--ac:#4c8dff}
+:root,html[data-theme=dark]{color-scheme:dark;--bg:#14161a;--pn:#202328;--ln:#31353c;--tx:#e8e9ec;--mu:#9a9fa8;--ac:#4c8dff;--acink:#fff;
+ --btn:#2d3036;--btnh:#383c43;--bbd:#3b4048;--bsh:0 2px 0 #0007;--inp:#121316;--inptx:#e8e9ec;--card:#1a1c20;--cardon:#1c2a44;
+ --pre:#0e0f11;--pretx:#c9ccd2;--hdbg:linear-gradient(#262a30,#1b1e23);--hdtx:#e8e9ec;--hdln:#31353c;--psh:0 1px 0 #ffffff0d inset,0 6px 18px #0005;
+ --pad0:linear-gradient(#3a3d44,#26282d);--padtx:#aeb3bb;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+html[data-theme=light]{color-scheme:light;--bg:#e6e9ed;--pn:#fff;--ln:#ccd1d8;--tx:#1d2127;--mu:#5d6672;--ac:#2563eb;--acink:#fff;
+ --btn:#f3f5f7;--btnh:#e6e9ed;--bbd:#c5cad2;--bsh:0 2px 0 #0000001a;--inp:#fff;--inptx:#1d2127;--card:#f5f7f9;--cardon:#dfeaff;
+ --pre:#f1f3f5;--pretx:#2b3138;--hdbg:linear-gradient(#ffffff,#eef1f4);--hdtx:#1d2127;--hdln:#ccd1d8;--psh:0 1px 0 #fff inset,0 6px 16px #2b3a5016;
+ --pad0:linear-gradient(#dde1e6,#c3c9d1);--padtx:#59616c}
+html[data-theme=mpc]{color-scheme:light;--bg:#b9b5a8;--pn:#d6d2c6;--ln:#8d897d;--tx:#25241f;--mu:#5a584f;--ac:#d6342a;--acink:#fff;
+ --btn:#ebe7da;--btnh:#f6f3e8;--bbd:#7f7b6f;--bsh:0 3px 0 #6f6b60;--inp:#b3c6a0;--inptx:#18260f;--card:#c9c5b8;--cardon:#c2d4ae;
+ --pre:#a8bd95;--pretx:#18260f;--hdbg:linear-gradient(#4a4a4c,#2f2f31);--hdtx:#ece8da;--hdln:#d6342a;--psh:0 1px 0 #fffb inset,0 -1px 0 #0003 inset,0 3px 0 #7f7b6f,0 8px 14px #0003;
+ --pad0:linear-gradient(#4b4b4d,#2b2b2d);--padtx:#bdbab0}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px -apple-system,system-ui,sans-serif}
-header{padding:14px 20px;border-bottom:1px solid var(--ln);font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+html[data-theme=mpc] body{background:var(--bg) repeating-linear-gradient(90deg,#0000 0 3px,#0000000a 3px 4px)}
+header{padding:12px 20px;background:var(--hdbg);color:var(--hdtx);border-bottom:3px solid var(--hdln);font-weight:600;font-size:16px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+html[data-theme=dark] header,html[data-theme=light] header{border-bottom-width:1px}
+header .hd{display:flex;gap:8px;align-items:center}
 header select{font-weight:400}
-.brand{letter-spacing:.02em}.sub{color:var(--mu);font-weight:400;font-size:13px;margin-left:6px}
+.brand{letter-spacing:.02em}.sub{opacity:.65;font-weight:400;font-size:13px;margin-left:6px}
 footer{max-width:1200px;margin:0 auto;padding:4px 20px 22px;color:var(--mu);font-size:12px}
-main{display:grid;grid-template-columns:minmax(320px,1fr) 440px;gap:16px;padding:16px 20px;max-width:1200px;margin:auto}
+main{display:grid;grid-template-columns:minmax(320px,1fr) 460px;gap:16px;padding:16px 20px;max-width:1220px;margin:auto}
 @media(max-width:900px){main{grid-template-columns:1fr}}
-section{background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:14px;margin-bottom:16px}
+section{background:var(--pn);border:1px solid var(--ln);border-radius:12px;padding:14px;margin-bottom:16px;box-shadow:var(--psh)}
 h2{margin:0 0 10px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mu)}
-button{background:#33363c;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:6px 10px;cursor:pointer;font:inherit}
-button:hover{background:#3d4148}button.pri{background:var(--ac);border-color:var(--ac);color:#fff;font-weight:600;padding:9px 16px}
-button:disabled{opacity:.5}input[type=text],input[type=number]{background:#17181b;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:6px 8px;font:inherit;width:100%}
+button{background:var(--btn);color:var(--tx);border:1px solid var(--bbd);border-radius:7px;padding:6px 10px;cursor:pointer;font:inherit;box-shadow:var(--bsh);transition:transform .05s,box-shadow .05s}
+button:hover{background:var(--btnh)}button:active{transform:translateY(2px);box-shadow:none}
+button.pri{background:var(--ac);border-color:#0004;color:var(--acink);font-weight:600;padding:9px 16px}button.pri:hover{filter:brightness(1.1)}
+button:disabled{opacity:.5}input[type=text],input[type=number]{background:var(--inp);color:var(--inptx);border:1px solid var(--bbd);border-radius:6px;padding:6px 8px;font:inherit;width:100%}
+html[data-theme=mpc] input[type=text],html[data-theme=mpc] input[type=number],html[data-theme=mpc] select.big,html[data-theme=mpc] .card select{box-shadow:inset 0 2px 4px #0004;font-family:var(--mono);font-size:13px}
+input[type=checkbox]{accent-color:var(--ac)}
 .row{display:flex;gap:8px;align-items:center;margin-bottom:8px}.row label{width:90px;color:var(--mu);flex:none}
 .path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mu);direction:rtl;text-align:left}
-.card{display:flex;gap:10px;align-items:center;border:2px solid var(--ln);border-radius:8px;padding:8px 10px;margin-bottom:8px;cursor:pointer;background:#202226}
-.card.on{border-color:var(--ac);background:#1f2a3f}.card{min-width:0}
+.card{display:flex;gap:10px;align-items:center;border:2px solid var(--ln);border-radius:9px;padding:8px 10px;margin-bottom:8px;cursor:pointer;background:var(--card);min-width:0}
+.card.on{border-color:var(--ac);background:var(--cardon)}
 .fi{flex:1;min-width:0}.fi b{display:block}
 .fi small{color:var(--mu);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dot{width:26px;height:26px;border-radius:50%;border:2px solid #fff3;flex:none;cursor:pointer}
-.tabs{display:flex;gap:4px;margin-bottom:10px}.tabs button{flex:1;padding:5px 0}.tabs .sel{background:var(--ac);border-color:var(--ac)}
-.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.pad{position:relative;aspect-ratio:1;min-width:0;min-height:0;overflow:hidden;border-radius:8px;border:1px solid #0006;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#2e3035;cursor:pointer;color:#fffc;font-weight:600;user-select:none}
-.pad small{width:100%;box-sizing:border-box;padding:0 4px;font-weight:400;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
-.pad select{width:92%;max-width:92%;font-size:10px;padding:1px 2px;border-radius:4px;border:1px solid #0003;background:#17181b;color:#fff;cursor:pointer}
+.dot{width:26px;height:26px;border-radius:50%;border:2px solid #fff6;flex:none;cursor:pointer;box-shadow:0 2px 3px #0006,inset 0 -3px 5px #0004,inset 0 2px 3px #fff5}
+.tabs{display:flex;gap:4px;margin-bottom:10px}.tabs button{flex:1;padding:5px 0}.tabs .sel{background:var(--ac);border-color:#0004;color:var(--acink)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:4px 2px 8px}
+.pad{position:relative;aspect-ratio:1;min-width:0;min-height:0;overflow:hidden;border-radius:12px;border:1px solid #0008;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--pad0);cursor:pointer;color:var(--padtx);font-weight:600;user-select:none;
+ box-shadow:0 5px 0 #0008,0 10px 14px #0006,inset 0 1px 1px #fff6,inset 0 -14px 18px #0000004d;text-shadow:0 1px 2px #0008;transition:transform .06s,box-shadow .06s,filter .1s}
+.pad::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:radial-gradient(120% 80% at 30% 0%,#ffffff55,#fff0 55%),linear-gradient(#fff0 55%,#0003)}
+.pad>*{position:relative}
+.pad .n{position:absolute;top:5px;left:8px;font-size:11px;opacity:.85}
+.pad:hover{filter:brightness(1.12)}
+.pad:active{transform:translateY(4px);box-shadow:0 1px 0 #0008,0 3px 6px #0006,inset 0 1px 1px #fff4,inset 0 -8px 12px #00000040}
+.pad.on{color:#fff}
+.pad.lt{color:#1b1b1b;text-shadow:0 1px 0 #fff6}
+.pad small{width:100%;box-sizing:border-box;padding:0 4px;font-weight:600;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.pad select{width:92%;max-width:92%;font-size:10px;padding:1px 2px;border-radius:4px;border:1px solid #0005;background:#000a;color:#fff;cursor:pointer;text-shadow:none}
 .padkw{display:flex;align-items:center;justify-content:center;gap:3px;width:100%}
 .padkw select{flex:1;min-width:0}
 .padtools{position:absolute;top:3px;right:3px;display:flex;gap:3px}
 .padcolor{width:14px;height:14px;border-radius:50%;flex:none;cursor:pointer;box-sizing:border-box;border:2px solid #fff;box-shadow:0 0 0 1px #000c}
-#dlg{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:30}
-#dlg>div{background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:16px;width:min(420px,90vw)}
+.ovl{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:30}
+.ovl>div{background:var(--pn);border:1px solid var(--ln);border-radius:12px;padding:16px;box-shadow:0 20px 50px #0008}
+#dlg>div{width:min(420px,90vw)}
 #dlgMsg{margin:0 0 12px;white-space:pre-wrap;line-height:1.4}#dlg input{margin-bottom:12px}
 .packchk{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--mu);flex:none;white-space:nowrap}
-.pad:hover{outline:2px solid #fff6}.hint{color:var(--mu);font-size:12px;margin-top:8px}
+.hint{color:var(--mu);font-size:12px;margin-top:8px}
 .chk{display:flex;gap:6px;align-items:center;margin:4px 0;color:var(--mu)}
-#pal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9}
-#pal>div{background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:16px;width:340px}
+#pal{z-index:9}#pal>div{width:340px}
 .sw{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:12px 0}
-.sw span{aspect-ratio:1;border-radius:8px;cursor:pointer;border:2px solid #fff2;position:relative}
+.sw span{aspect-ratio:1;border-radius:9px;cursor:pointer;border:2px solid #fff3;position:relative;box-shadow:0 3px 0 #0006,inset 0 1px 1px #fff5,inset 0 -6px 8px #0003}
 .sw span.est::after{content:"?";position:absolute;right:3px;top:0;font-size:11px;color:#fffb}
-pre{background:#131416;border-radius:6px;padding:10px;max-height:220px;overflow:auto;margin:10px 0 0;font-size:12px;white-space:pre-wrap}
-.err{color:#ff7b72}
-.card select{width:auto;background:#17181b;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:3px 4px;font:inherit;font-size:12px}
-select.big,header select{background:#17181b;color:var(--tx);border:1px solid var(--ln);border-radius:6px;padding:5px;font:inherit}
+pre{background:var(--pre);color:var(--pretx);border-radius:6px;padding:10px;max-height:220px;overflow:auto;margin:10px 0 0;font:12px var(--mono);white-space:pre-wrap}
+.err{color:#e5493d}
+.card select{width:auto;background:var(--inp);color:var(--inptx);border:1px solid var(--bbd);border-radius:6px;padding:3px 4px;font:inherit;font-size:12px}
+select.big,header select{background:var(--inp);color:var(--inptx);border:1px solid var(--bbd);border-radius:6px;padding:5px;font:inherit}
+html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color:#666;font-family:inherit}
+#kw>div{width:min(940px,96vw);max-height:92vh;display:flex;flex-direction:column;padding:18px}
+#kw h3{margin:0 0 4px;font-size:17px}
+#kwRows{overflow:auto;flex:1;min-height:120px;margin:10px 0;padding-right:4px}
+.kwr{display:grid;grid-template-columns:30px 170px 1fr 54px 30px;gap:6px;align-items:center;margin-bottom:6px}
+.kwr input{font-family:var(--mono);font-size:13px}
+.kwr .cnt{font-size:12px;color:var(--mu);text-align:right}.kwr .cnt.zero{color:#e5493d;font-weight:600}
+.kwr .mv{display:flex;flex-direction:column;gap:1px}.kwr .mv button{padding:0 4px;font-size:9px;line-height:12px;box-shadow:none}
+.kwr.hd{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mu);margin:0}
+.kwr input.bad{border-color:#e5493d}
+.kwbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.kwbar .sp{flex:1}
+#kwHelp{font-size:12px;color:var(--mu);line-height:1.5;white-space:pre-wrap;background:var(--card);border:1px solid var(--ln);border-radius:8px;padding:8px 10px;margin:6px 0 0}
+#kwMsg{font-size:13px;min-height:18px}
+@media(max-width:640px){.kwr{grid-template-columns:26px 1fr 40px 28px;margin-bottom:12px}.kwr input:nth-of-type(2){grid-column:2/5;grid-row:2}.kwr button:last-child{grid-row:1;grid-column:4}.kwr .cnt{grid-row:1;grid-column:3}.kwr.hd{display:none}}
 </style>
-<header><span><b class="brand">Wavethings</b> Kit Creator <span class="sub" data-i18n="hdr_sub"></span></span><select id="lang"><option value="en">English</option><option value="es">Español</option></select></header>
+<header><span><b class="brand">Wavethings</b> Kit Creator <span class="sub" data-i18n="hdr_sub"></span></span><span class="hd"><select id="theme" title="Theme"><option value="dark"></option><option value="light"></option><option value="mpc"></option></select><select id="lang"><option value="en">English</option><option value="es">Español</option></select></span></header>
 <main>
 <div>
  <section><h2 data-i18n="sec_presets"></h2>
@@ -477,7 +590,7 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
   <div id="folders"></div>
   <div class="row" style="margin:0"><button onclick="addFolder()" data-i18n="btn_add"></button><button onclick="addSubfolders()" data-i18n="btn_addsub" data-title="title_addsub"></button><button id="btnRescan" onclick="rescanAll(true)" style="margin-left:auto" data-i18n="btn_rescan" data-title="title_rescan"></button><button id="btnClear" onclick="clearFolders()" data-i18n="btn_clear" data-title="title_clear"></button></div>
   <div class="hint" data-i18n="hint_folders"></div>
-  <div class="row" style="margin-top:4px"><span id="groupsInfo" class="hint" style="margin:0"></span><button onclick="editGroupsFile()" data-title="title_editgroups" data-i18n="btn_editgroups"></button></div>
+  <div class="row" style="margin-top:4px"><span id="groupsInfo" class="hint" style="margin:0"></span><button onclick="kwOpen()" data-title="title_editgroups" data-i18n="btn_editgroups"></button></div>
  </section>
  <section><h2 data-i18n="sec_output"></h2>
   <div class="row"><label data-i18n="lbl_template"></label><button onclick="pickTo('template','xpm')" data-i18n="btn_othertpl"></button><button onclick="S.template='';render();save()" data-i18n="btn_builtin" data-title="title_builtin"></button><span class="path" id="tpl"></span></div>
@@ -511,11 +624,19 @@ select.big,header select{background:#17181b;color:var(--tx);border:1px solid var
 </div>
 </main>
 <footer><span data-i18n="footer"></span> · v__VERSION__</footer>
-<div id="dlg"><div><p id="dlgMsg"></p><input type="text" id="dlgIn"><div class="row" style="justify-content:flex-end;margin:0"><button id="dlgNo"></button><button class="pri" id="dlgOk"></button></div></div></div>
-<div id="pal" onclick="if(event.target===this)this.style.display='none'"><div>
+<div id="dlg" class="ovl"><div><p id="dlgMsg"></p><input type="text" id="dlgIn"><div class="row" style="justify-content:flex-end;margin:0"><button id="dlgNo"></button><button class="pri" id="dlgOk"></button></div></div></div>
+<div id="pal" class="ovl" onclick="if(event.target===this)this.style.display='none'"><div>
  <b id="palTitle"></b><div class="sw" id="sw"></div>
  <div class="row"><button id="btnNocolor" onclick="setColor(0)"></button><button id="btnImport" onclick="importColors()" data-i18n="btn_import"></button></div>
  <div class="hint" id="palHint"></div>
+</div></div>
+<div id="kw" class="ovl"><div>
+ <h3 data-i18n="kw_title"></h3><div class="hint" style="margin:0" data-i18n="kw_sub"></div>
+ <div class="kwbar" style="margin-top:8px"><span id="kwTestLbl" style="color:var(--mu)" data-i18n="kw_test"></span><select class="big" id="kwTest" style="min-width:200px;max-width:360px"></select><span class="sp"></span><button onclick="$('kwHelp').style.display=$('kwHelp').style.display==='none'?'block':'none'" data-i18n="kw_help_btn"></button></div>
+ <div id="kwHelp" style="display:none" data-i18n="kw_help"></div>
+ <div id="kwRows"></div>
+ <div id="kwMsg" class="err"></div>
+ <div class="kwbar"><button onclick="kwAdd()" data-i18n="kw_add"></button><button onclick="kwReset()" data-i18n="kw_reset"></button><button onclick="editGroupsFile()" data-title="title_editgroups" data-i18n="kw_openfile"></button><span class="sp"></span><button onclick="kwClose()" data-i18n="dlg_cancel"></button><button class="pri" onclick="kwSave()" data-i18n="kw_save"></button></div>
 </div></div>
 <script>
 const TOKEN="__TOKEN__";
@@ -544,12 +665,22 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  btn_go:"Generate kits",sec_pads:"Pads",bank:"Bank {0}",
  chk_mix:"Mix: clicking a pad adds the active folder (instead of replacing). Shift+click does the opposite.",
  btn_fill:"Whole bank → active folder",btn_clearbank:"Clear bank",lbl_copy:"Copy this bank to",btn_copy:"Copy",opt_all:"all the others",
- hint_pads:"Layout matches the MPC: pad 1 is bottom-left. Pads with several folders show diagonal stripes: for each kit one folder is picked at random (equal probability for all) and then a sample from it. The pad's color and choke come from its first folder. A pad linked to a Pack folder shows a dropdown to pick a keyword group for it — leave it on “— whole pack —” to use every sample in the pack instead. Edit the groups themselves in keyword_groups.txt (see the app's settings folder) and reload the page.",
+ hint_pads:"Layout matches the MPC: pad 1 is bottom-left. Pads with several folders show diagonal stripes: for each kit one folder is picked at random (equal probability for all) and then a sample from it. The pad's color and choke come from its first folder. A pad linked to a Pack folder shows a dropdown to pick a keyword group for it — leave it on “— whole pack —” to use every sample in the pack instead. Edit the groups with “Edit keyword groups”.",
  pal_title:"Folder color",btn_nocolor:"No color",btn_import:"Import colors from an .xpm",
  pal_title_group:"Color for group “{0}”",btn_usefolder:"Use the folder's color",
  hint_pal_group:"This color is used on every pad set to this group, wherever it's assigned, instead of its folder's color.",
  group_color_title:"Set a color for every pad using “{0}”",
- btn_editgroups:"✎ Edit keyword groups",title_editgroups:"Opens keyword_groups.txt in a text editor (TextEdit on macOS)",
+ btn_editgroups:"✎ Edit keyword groups",title_editgroups:"Edit the keyword groups here, or open keyword_groups.txt in a text editor",
+ theme_dark:"Dark",theme_light:"Light",theme_mpc:"Classic MPC",
+ kw_title:"Keyword groups",kw_sub:"Each group is a pad type for Pack mode. Separate keywords with commas.",
+ kw_help_btn:"Syntax help",kw_help:"word  → the sample's folder or file name contains it (case-insensitive).\n-word  → exclusion: a sample containing it never goes in this group (“-loop” keeps loops out of one-shot groups).\n+word  → requirement: it must contain it (“Loop Bass: +loop, bass, sub” = loops that also say bass or sub).\nShort words (up to 3-4 letters, like sd, cp, hh) only match as whole words. The order here is the order of the pad dropdown.",
+ kw_test:"Count samples in:",kw_test_none:"(no Pack folder)",kw_add:"＋ Add group",kw_reset:"Restore defaults",kw_openfile:"Open as text file",kw_save:"Save groups",
+ kw_col_name:"Group",kw_col_words:"Keywords",kw_name_ph:"Group name",kw_words_ph:"kick, kik, bd, -loop",kw_del:"Delete group",
+ kw_up:"Move up",kw_down:"Move down",
+ kw_reset_confirm:"Replace all your groups with the built-in defaults? Your current file is kept as keyword_groups.txt.bak.",
+ kw_used_confirm:"{0} pad assignment(s) use groups you deleted or renamed to something unknown. They will go back to “whole pack”. Continue?",
+ kw_saved:"{0} keyword group(s) saved",
+ err_bad_name:"Every group needs a name (it cannot contain “:”).",err_dup_name:"Two groups have the same name.",err_no_keywords:"Every group needs at least one keyword.",err_no_groups:"Add at least one group.",
  groups_count:"{0} keyword group(s) loaded",
  hint_pal:"These are the MPC's own pad colors. If you need one that isn't here, import an .xpm where you painted pads with it (classic format or the one saved by MPC 3.x) and it will be added.",
  not_found:"⚠ folder not found",n_samples:"{0} samples",pads_lbl:"pads",none:"none",chg_color:"Change color",mute_grp:"Mute group",
@@ -582,12 +713,22 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  btn_go:"Generar kits",sec_pads:"Pads",bank:"Banco {0}",
  chk_mix:"Mezclar: al pulsar un pad, añadir la carpeta activa (en vez de reemplazar). Mayús+clic hace lo contrario.",
  btn_fill:"Banco completo → carpeta activa",btn_clearbank:"Vaciar banco",lbl_copy:"Copiar este banco a",btn_copy:"Copiar",opt_all:"todos los demás",
- hint_pads:"Disposición igual que la MPC: el pad 1 es el de abajo a la izquierda. Los pads con varias carpetas se ven con franjas diagonales: en cada kit se elige una carpeta al azar (todas con la misma probabilidad) y una muestra de ella. El color y el choke del pad son los de su primera carpeta. Un pad vinculado a una carpeta Pack muestra un desplegable para elegir su grupo de palabras clave — déjalo en «— todo el pack —» para usar todas las muestras del pack. Edita los grupos en keyword_groups.txt (en la carpeta de configuración de la app) y recarga la página.",
+ hint_pads:"Disposición igual que la MPC: el pad 1 es el de abajo a la izquierda. Los pads con varias carpetas se ven con franjas diagonales: en cada kit se elige una carpeta al azar (todas con la misma probabilidad) y una muestra de ella. El color y el choke del pad son los de su primera carpeta. Un pad vinculado a una carpeta Pack muestra un desplegable para elegir su grupo de palabras clave — déjalo en «— todo el pack —» para usar todas las muestras del pack. Edita los grupos con «Editar grupos de palabras clave».",
  pal_title:"Color de la carpeta",btn_nocolor:"Sin color",btn_import:"Importar colores de un .xpm",
  pal_title_group:"Color del grupo «{0}»",btn_usefolder:"Usar el color de la carpeta",
  hint_pal_group:"Este color se usa en todos los pads con este grupo, dondequiera que estén asignados, en vez del color de su carpeta.",
  group_color_title:"Fija un color para todos los pads que usan «{0}»",
- btn_editgroups:"✎ Editar grupos de palabras clave",title_editgroups:"Abre keyword_groups.txt en un editor de texto (TextEdit en macOS)",
+ btn_editgroups:"✎ Editar grupos de palabras clave",title_editgroups:"Edita los grupos aquí, o abre keyword_groups.txt en un editor de texto",
+ theme_dark:"Oscuro",theme_light:"Claro",theme_mpc:"MPC clásico",
+ kw_title:"Grupos de palabras clave",kw_sub:"Cada grupo es un tipo de pad para el modo Pack. Separa las palabras con comas.",
+ kw_help_btn:"Ayuda de sintaxis",kw_help:"palabra  → el nombre de la carpeta o del archivo la contiene (sin distinguir mayúsculas).\n-palabra  → exclusión: una muestra que la contenga nunca entra en este grupo («-loop» deja los loops fuera de los grupos de one-shots).\n+palabra  → requisito: debe contenerla («Loop Bass: +loop, bass, sub» = loops que además dicen bass o sub).\nLas palabras cortas (hasta 3-4 letras, como sd, cp, hh) solo coinciden como palabra completa. El orden de aquí es el del desplegable de los pads.",
+ kw_test:"Contar muestras en:",kw_test_none:"(sin carpeta Pack)",kw_add:"＋ Añadir grupo",kw_reset:"Restaurar valores",kw_openfile:"Abrir como archivo de texto",kw_save:"Guardar grupos",
+ kw_col_name:"Grupo",kw_col_words:"Palabras clave",kw_name_ph:"Nombre del grupo",kw_words_ph:"kick, kik, bd, -loop",kw_del:"Borrar grupo",
+ kw_up:"Subir",kw_down:"Bajar",
+ kw_reset_confirm:"¿Sustituir todos tus grupos por los predeterminados? Tu archivo actual se guarda como keyword_groups.txt.bak.",
+ kw_used_confirm:"{0} asignación(es) de pads usan grupos que has borrado o renombrado a algo desconocido. Volverán a «todo el pack». ¿Continuar?",
+ kw_saved:"{0} grupo(s) de palabras clave guardados",
+ err_bad_name:"Cada grupo necesita un nombre (no puede contener «:»).",err_dup_name:"Hay dos grupos con el mismo nombre.",err_no_keywords:"Cada grupo necesita al menos una palabra clave.",err_no_groups:"Añade al menos un grupo.",
  groups_count:"{0} grupo(s) de palabras clave cargados",
  hint_pal:"Estos son los colores de pad propios de la MPC. Si necesitas otro que no esté, importa un .xpm donde hayas pintado pads con él (formato clásico o el que guarda la MPC 3.x) y se añadirá.",
  not_found:"⚠ carpeta no encontrada",n_samples:"{0} samples",pads_lbl:"pads",none:"ninguno",chg_color:"Cambiar color",mute_grp:"Grupo de choque",
@@ -602,9 +743,10 @@ function applyStatic(){
   document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll("[data-ph]").forEach(e=>e.placeholder=t(e.dataset.ph));
   document.querySelectorAll("[data-title]").forEach(e=>e.title=t(e.dataset.title));
+  for(const o of $("theme").options)o.textContent=t(`theme_${o.value}`);
   document.documentElement.lang=LANG}
 const colName=c=>{const m=/^Import(?:ed|ado) (\d+)$/.exec(c.name);return m?t("col.imported")+" "+m[1]:(I18N[LANG]["col."+c.name]||c.name)};
-const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",preset:"",folders:[],padmap:{}};
+const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",theme:"",preset:"",folders:[],padmap:{}};
 let PAL=[],PRESETS={},GROUPS={},GROUPNAMES=[],GROUPCOLORS={},active=null,bank=0,palFor=null,palType="folder",MAC=true,saveT=null,copyTarget="all";
 const $=id=>document.getElementById(id), BANKS="ABCDEFGH";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -719,6 +861,73 @@ async function setColor(v){
   $("pal").style.display="none";render();save()}
 async function importColors(){const p=await pathFrom("xpm");if(!p)return;const r=await api("/api/import_colors",{path:p});
   if(r.error){await uiAlert(r.error);return}PAL=r.palette;await uiAlert(t("found",r.found));openPal(palFor)}
+function applyTheme(){const th=["dark","light","mpc"].includes(S.theme)?S.theme:(matchMedia&&matchMedia("(prefers-color-scheme: light)").matches?"light":"dark");
+  document.documentElement.dataset.theme=th;$("theme").value=th}
+const lumOf=v=>{const r=((v>>16)&127)*2,g=((v>>8)&127)*2,b=(v&127)*2;return(.299*r+.587*g+.114*b)/255};
+$("theme").onchange=e=>{S.theme=e.target.value;applyTheme();save()};
+let KW=[],kwT=null,kwSeq=0;
+async function kwOpen(){
+  const r=await api("/api/groups",{action:"get"});if(r.error)return;
+  KW=Object.entries(r.groups).map(([n,k])=>({id:++kwSeq,orig:n,name:n,kw:k.join(", ")}));
+  $("kwMsg").textContent="";
+  const packs=S.folders.filter(f=>f.pack&&f.count>0);
+  $("kwTest").innerHTML=packs.length?packs.map(f=>`<option value="${esc(f.id)}">${esc(f.path.split(/[\\/]/).pop()||f.path)}</option>`).join(""):`<option value="">${esc(t("kw_test_none"))}</option>`;
+  $("kwTest").disabled=!packs.length;
+  kwRender();$("kw").style.display="flex";kwCounts()}
+function kwClose(){$("kw").style.display="none"}
+function kwRender(){
+  $("kwRows").innerHTML=`<div class="kwr hd"><span></span><span>${esc(t("kw_col_name"))}</span><span>${esc(t("kw_col_words"))}</span><span></span><span></span></div>`+
+   KW.map((g,i)=>`<div class="kwr" data-id="${g.id}">
+    <span class="mv"><button title="${esc(t("kw_up"))}" onclick="kwMove(${i},-1)">▲</button><button title="${esc(t("kw_down"))}" onclick="kwMove(${i},1)">▼</button></span>
+    <input type="text" value="${esc(g.name)}" placeholder="${esc(t("kw_name_ph"))}" oninput="kwEdit(${g.id},'name',this.value)">
+    <input type="text" value="${esc(g.kw)}" placeholder="${esc(t("kw_words_ph"))}" oninput="kwEdit(${g.id},'kw',this.value)">
+    <span class="cnt" id="kc${g.id}"></span>
+    <button title="${esc(t("kw_del"))}" onclick="kwDel(${g.id})">✕</button></div>`).join("")}
+function kwEdit(id,k,v){const g=KW.find(x=>x.id===id);g[k]=v;clearTimeout(kwT);kwT=setTimeout(kwCounts,500)}
+function kwMove(i,d){const j=i+d;if(j<0||j>=KW.length)return;[KW[i],KW[j]]=[KW[j],KW[i]];kwRender();kwCounts()}
+function kwDel(id){KW=KW.filter(g=>g.id!==id);kwRender();kwCounts()}
+function kwAdd(){KW.push({id:++kwSeq,orig:"",name:"",kw:""});kwRender();kwCounts();
+  const rows=$("kwRows");rows.scrollTop=1e9;const ins=rows.querySelectorAll(".kwr:last-child input");if(ins[0])ins[0].focus()}
+const kwWords=g=>g.kw.split(",").map(x=>x.trim()).filter(Boolean);
+async function kwCounts(){
+  const f=S.folders.find(x=>x.id===$("kwTest").value);
+  for(const g of KW){const e=$("kc"+g.id);if(e){e.textContent="";e.className="cnt"}}
+  if(!f)return;
+  const groups={};KW.forEach(g=>{if(g.name.trim()&&kwWords(g).length)groups[g.name.trim()]=kwWords(g)});
+  const r=await api("/api/scan",{path:f.path,recursive:true,pack:true,groups});
+  for(const g of KW){const n=(r.groupCounts||{})[g.name.trim()],e=$("kc"+g.id);if(e&&n!==undefined){e.textContent=n;e.className="cnt"+(n===0?" zero":"")}}}
+$("kwTest").onchange=kwCounts;
+async function kwSave(){
+  const items=KW.filter(g=>g.name.trim()||g.kw.trim());
+  const rows=[...$("kwRows").querySelectorAll(".kwr:not(.hd)")];
+  rows.forEach(r=>r.querySelectorAll("input").forEach(i=>i.classList.remove("bad")));
+  const names=items.map(g=>g.name.trim().toLowerCase());
+  const bad=(g,why)=>{const r=$("kwRows").querySelector(`.kwr[data-id="${g.id}"]`);if(r)r.querySelectorAll("input")[why==="name"?0:1].classList.add("bad");return why};
+  for(const g of items){
+    if(!g.name.trim()||g.name.includes(":")||g.name.trim().startsWith("#")){bad(g,"name");$("kwMsg").textContent=t("err_bad_name");return}
+    if(names.indexOf(g.name.trim().toLowerCase())!==names.lastIndexOf(g.name.trim().toLowerCase())){bad(g,"name");$("kwMsg").textContent=t("err_dup_name");return}
+    if(!kwWords(g).length){bad(g,"kw");$("kwMsg").textContent=t("err_no_keywords");return}}
+  if(!items.length){$("kwMsg").textContent=t("err_no_groups");return}
+  $("kwMsg").textContent="";
+  const renames={};items.forEach(g=>{if(g.orig&&g.orig!==g.name.trim())renames[g.orig]=g.name.trim()});
+  const newNames=new Set(items.map(g=>g.name.trim()));
+  // pad entries that point at a group that will no longer exist (after applying renames)
+  const mapName=n=>renames[n]||n;
+  let orphan=0;for(const p in S.padmap)for(const e of S.padmap[p]){const g=entryGroup(e);if(g&&!newNames.has(mapName(g)))orphan++}
+  if(orphan&&!(await uiConfirm(t("kw_used_confirm",orphan))))return;
+  const r=await api("/api/groups",{action:"save",groups:items.map(g=>({name:g.name.trim(),keywords:kwWords(g)})),renames});
+  if(r.error){$("kwMsg").textContent=t(`err_${r.error}`);return}
+  applyGroups(r,renames);kwClose();$("msg").textContent=t("kw_saved",GROUPNAMES.length);rescanAll()}
+function applyGroups(r,renames){
+  GROUPS=r.groups;GROUPNAMES=Object.keys(GROUPS);GROUPCOLORS=r.groupColors||{};
+  for(const p in S.padmap)S.padmap[p]=S.padmap[p].map(e=>{const g=entryGroup(e);if(!g)return e;
+    const n=(renames&&renames[g])||g;return GROUPS[n]?{id:entryId(e),group:n}:entryId(e)});
+  render();save()}
+async function kwReset(){
+  if(!(await uiConfirm(t("kw_reset_confirm"))))return;
+  const r=await api("/api/groups",{action:"reset"});if(r.error)return;
+  applyGroups(r,{});KW=Object.entries(r.groups).map(([n,k])=>({id:++kwSeq,orig:n,name:n,kw:k.join(", ")}));kwRender();kwCounts();rescanAll()}
+addEventListener("keydown",e=>{if(e.key==="Escape"&&$("kw").style.display==="flex"&&$("dlg").style.display!=="flex")kwClose()});
 async function editGroupsFile(){const r=await api("/api/edit_groups",{});if(r.error)await uiAlert(r.error)}
 function render(){
   $("lang").value=LANG;$("btnClear").disabled=$("btnRescan").disabled=!S.folders.length;
@@ -746,7 +955,8 @@ function render(){
      return `<div class="padkw"><select onclick="event.stopPropagation()" onchange="setGroup(${n},'${f.id}',this.value)">${groupOpts(entryGroup(e),f)}</select></div>`}).join("");
    const dots=pairs.filter(({e,f})=>f.pack&&entryGroup(e)).map(({e,f})=>{const g=entryGroup(e);
      return `<span class="padcolor" style="background:${css(entryColor(e,f))}" onclick="event.stopPropagation();openPalGroup('${jsq(g)}')" title="${esc(t('group_color_title',g))}"></span>`}).join("");
-   h+=`<div class="pad" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span>${n}</span>${body}${dots?`<div class="padtools">${dots}</div>`:""}</div>`}
+   const lt=f&&(pairs.reduce((a,x)=>a+lumOf(entryColor(x.e,x.f)),0)/pairs.length)>.62;
+   h+=`<div class="pad${f?" on":""}${lt?" lt":""}" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span class="n">${n}</span>${body}${dots?`<div class="padtools">${dots}</div>`:""}</div>`}
   $("pads").innerHTML=h;
   const ct=[...Array(8).keys()].filter(b=>b!==bank);if(copyTarget!=="all"&&+copyTarget===bank)copyTarget="all";
   $("copyTo").innerHTML=`<option value="all">${t("opt_all")}</option>`+ct.map(b=>`<option value="${b}">${t("bank",BANKS[b])}</option>`).join("");$("copyTo").value=copyTarget;
@@ -777,7 +987,8 @@ addEventListener("pagehide",()=>navigator.sendBeacon("/api/bye?t="+TOKEN));
 (async()=>{const r=await api("/api/state");PAL=r.palette;PRESETS=r.presets||{};GROUPS=r.keywordGroups||{};GROUPNAMES=Object.keys(GROUPS);GROUPCOLORS=r.groupColors||{};MAC=r.mac;if(r.state)Object.assign(S,r.state);for(const p in S.padmap)if(!Array.isArray(S.padmap[p]))S.padmap[p]=[S.padmap[p]];
   for(const f of S.folders)if(f.pack===undefined)f.pack=false;
   LANG=S.lang&&I18N[S.lang]?S.lang:((navigator.language||"en").toLowerCase().startsWith("es")?"es":"en");S.lang=LANG;
-  for(const f of S.folders)await scan(f);lastScan=Date.now();active=S.folders.length?S.folders[0].id:null;applyStatic();render()})();
+  active=S.folders.length?S.folders[0].id:null;applyTheme();applyStatic();render();
+  for(const f of S.folders)await scan(f);lastScan=Date.now();render()})();
 </script></html>'''
 
 

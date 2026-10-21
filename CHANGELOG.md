@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-10-21
+
+### Added
+- **Keyword-group editor inside the app**: "✎ Edit keyword groups" opens a window to add, rename,
+  reorder and delete groups and edit their keywords (`-exclude`, `+require`) without leaving the
+  program. It can count how many samples each group finds in any of your Pack folders while you
+  type, before saving. A renamed group keeps its pad assignments and color; deleting a group that
+  pads use asks first. "Restore defaults" keeps your file as `keyword_groups.txt.bak`, and "Open as
+  text file" is still there.
+- **Three themes** — Dark, Light and **Classic MPC** (cream case, dark faceplate header, red accent,
+  LCD-green fields) — chosen from the header and remembered between launches (like the language).
+  By default it follows the system's light/dark setting.
+
+### Changed
+- **New pad look**: pads have volume — glossy top, shaded bottom, drop shadow — and press down when
+  clicked. Text on very light pad colors switches to dark so it stays readable.
+- The interface now draws immediately at startup and fills in sample counts as the folders are
+  scanned, instead of staying blank until the last folder finished.
+
 ## [1.9.5] - 2026-10-11
 
 ### Fixed

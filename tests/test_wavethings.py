@@ -1194,6 +1194,14 @@ class StartFresh(unittest.TestCase):
         gui.fresh_session()
         self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {"lang": "es"})
 
+    def test_theme_is_kept_too_but_only_a_known_one(self):
+        gui.STATE_FILE.write_text(json.dumps({"theme": "mpc", "padmap": {"1": ["a"]}}))
+        gui.fresh_session()
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {"theme": "mpc"})
+        gui.STATE_FILE.write_text(json.dumps({"theme": "<script>"}))
+        gui.fresh_session()
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {})
+
     def test_works_without_a_previous_state_or_with_a_corrupt_one(self):
         gui.fresh_session()
         self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {})
@@ -1210,6 +1218,72 @@ class StartFresh(unittest.TestCase):
             self.assertIn("A", gui.load_presets())
         finally:
             gui.PRESETS_FILE = old
+
+
+class GroupEditorApi(GroupColorApi):
+    """The in-app keyword editor: /api/groups (get / save / reset) and draft counts in /api/scan."""
+
+    def setUp(self):
+        super().setUp()
+        self.old_groups = gui.GROUPS_FILE
+        gui.GROUPS_FILE = Path(tempfile.mkdtemp()) / "keyword_groups.txt"
+
+    def tearDown(self):
+        gui.GROUPS_FILE = self.old_groups
+        super().tearDown()
+
+    def save(self, *items, renames=None):
+        return self.api("/api/groups", {"action": "save", "renames": renames or {},
+                                        "groups": [{"name": n, "keywords": k} for n, k in items]})
+
+    def test_get_returns_the_default_groups(self):
+        r = self.api("/api/groups", {"action": "get"})
+        self.assertIn("Kick", r["groups"])
+        self.assertEqual(r["groups"], gui.kc.load_keyword_groups(gui.kc.DEFAULT_KEYWORD_GROUPS_TEXT))
+
+    def test_save_writes_a_file_that_reloads_the_same_and_keeps_the_header(self):
+        r = self.save(("Kick", ["kick", "-loop"]), ("Loop Bass", ["+loop", "bass"]))
+        self.assertEqual(r["groups"], {"Kick": ["kick", "-loop"], "Loop Bass": ["+loop", "bass"]})
+        text = gui.GROUPS_FILE.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# Wavethings Kit Creator"))
+        self.assertEqual(list(gui.kc.load_keyword_groups(text)), ["Kick", "Loop Bass"])    # order kept
+        self.assertEqual(self.api("/api/state")["keywordGroups"], r["groups"])
+
+    def test_save_accepts_keywords_as_a_comma_string_and_drops_empty_rows(self):
+        r = self.save(("A", "x, y ,"), ("", ""))
+        self.assertEqual(r["groups"], {"A": ["x", "y"]})
+
+    def test_save_validates(self):
+        self.assertEqual(self.save(("a:b", ["x"])), {"error": "bad_name"})
+        self.assertEqual(self.save(("", ["x"])), {"error": "bad_name"})
+        self.assertEqual(self.save(("A", ["x"]), ("a", ["y"])), {"error": "dup_name"})
+        self.assertEqual(self.save(("A", [])), {"error": "no_keywords"})
+        self.assertEqual(self.save(), {"error": "no_groups"})
+        self.assertFalse(gui.GROUPS_FILE.exists())            # nothing was written on a rejected save
+
+    def test_rename_moves_the_group_color_and_delete_drops_it(self):
+        gui.store_group_colors({"Kick": 5, "Snare": 6})
+        r = self.save(("Bombo", ["kick"]), ("Snare", ["snare"]), renames={"Kick": "Bombo"})
+        self.assertEqual(r["groupColors"], {"Bombo": 5, "Snare": 6})
+        r = self.save(("Bombo", ["kick"]))
+        self.assertEqual(r["groupColors"], {"Bombo": 5})
+
+    def test_reset_restores_defaults_and_keeps_a_backup(self):
+        self.save(("Only", ["one"]))
+        r = self.api("/api/groups", {"action": "reset"})
+        self.assertEqual(r["groups"], gui.kc.load_keyword_groups(gui.kc.DEFAULT_KEYWORD_GROUPS_TEXT))
+        self.assertIn("Only", gui.GROUPS_FILE.with_name("keyword_groups.txt.bak").read_text(encoding="utf-8"))
+
+    def test_unknown_action_is_rejected(self):
+        self.assertEqual(self.api("/api/groups", {"action": "nope"}), {"error": "invalid"})
+
+    def test_scan_counts_unsaved_draft_groups(self):
+        pack = Path(tempfile.mkdtemp())
+        for n in ("Kick 01.wav", "Kick 02.wav", "Snare 01.wav"):
+            (pack / n).write_bytes(b"RIFF")
+        r = self.api("/api/scan", {"path": str(pack), "pack": True,
+                                   "groups": {"Mine": ["kick"], "Empty": ["zzz"]}})
+        self.assertEqual(r["groupCounts"], {"Mine": 2, "Empty": 0})
 
 
 class ScanApi(unittest.TestCase):

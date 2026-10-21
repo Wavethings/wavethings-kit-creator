@@ -20,7 +20,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.9.5"
+__version__ = "1.10.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
