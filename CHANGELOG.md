@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] - 2026-10-22
+
+### Changed
+- **Warp now works on loops, not on numbers in the name.** Every loop gets Warp switched on — a sample
+  is a loop when its name or a parent folder says "loop", or when its pad uses a keyword group that
+  asks for loops (Loop, Loop Drums, Loop Bass ...). The pad's tempo is the one in the name ("128bpm", or
+  a bare number like `DPT_A#_138_Bass_Loop` when it agrees with the loop's length); if there is none,
+  it is estimated from the loop's length (whole 4/4 bars, 90-180 BPM). One-shots are never warped,
+  even with "bpm" in the name. The log counts the loops warped and the ones where no tempo could be found.
+- **Key transposition now draws from every key.** Before, samples already in the kit's key were
+  preferred, so in a large pack almost nothing ever needed transposing. Now samples are chosen at
+  random from all keys and each one is pitched to the kit's key; the log lists every transposed pad
+  with its shift (e.g. `Transposed to C (pad, semitones): 3 (-2), 7 (+5)`). The option is now called
+  "Give each kit one key" with "Transpose samples in other keys ... instead of skipping them".
+- **All options moved to their own window** ("⚙ Options…", under Output), grouped as Samples, Key and
+  Output. A one-line summary of the active options stays next to the button.
+
 ## [1.12.0] - 2026-10-22
 
 ### Fixed

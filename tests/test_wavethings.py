@@ -181,7 +181,7 @@ class Languages(unittest.TestCase):
     def test_engine_messages_match_between_languages(self):
         self.assertEqual(set(kc.MSG["en"]), set(kc.MSG["es"]))
         for k in kc.MSG["en"]:
-            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1, warp=1, tuned=1, long=1)
+            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1, warp=1, tuned=1, long=1, notempo=1)
             if k != "h_name":
                 kc.MSG["en"][k].format(**kw)
                 kc.MSG["es"][k].format(**kw)
@@ -1334,19 +1334,41 @@ class LoopsWarpAndKey(unittest.TestCase):
         self.assertEqual((l2.find("SliceEnd").text, l2.find("SampleEnd").text), ("300000", "0"))
         self.assertTrue(any("long samples with full length: 1" in l for l in logs), logs)
 
-    def test_warp_is_on_for_a_bpm_in_the_name_and_can_be_disabled(self):
-        self.make("L/Synth Loop 128bpm.wav")
-        self.make("K/Kick 808.wav")
-        pads = {1: [self.tmp / "L"], 2: [self.tmp / "K"]}
-        xpm, _ = self.gen(pads)
-        i1, _ = self.layer(xpm, 1)
-        i2, _ = self.layer(xpm, 2)
-        self.assertEqual((i1.find("WarpEnable").text, i1.find("WarpTempo").text), ("True", "128.000000"))
-        self.assertEqual(i2.find("WarpEnable").text, "False")
-        self.assertEqual(i1.find("OneShot").text, "True")           # nothing else about the pad changed
+    def test_warp_is_on_for_loops_only_whatever_number_the_name_has(self):
+        self.make("L/Synth Loop 128bpm.wav", 330750)        # labelled tempo (7.5 s = 4 bars at 128)
+        self.make("L2/DPT_A#_138_Bass_Synth_Loop_Chunk.wav", int(44100 * 240 * 4 / 138))   # bare number
+        self.make("L3/Chord Loop 07.wav", int(44100 * 240 * 2 / 100))   # a number that isn't a tempo: use length
+        self.make("K/Kick 808 128bpm.wav")                 # not a loop: untouched, even with a bpm in it
+        pads = {1: [self.tmp / "L"], 2: [self.tmp / "L2"], 3: [self.tmp / "L3"], 4: [self.tmp / "K"]}
+        xpm, logs = self.gen(pads)
+        got = {p: (self.layer(xpm, p)[0].find("WarpEnable").text, self.layer(xpm, p)[0].find("WarpTempo").text)
+               for p in (1, 2, 3, 4)}
+        self.assertEqual(got[1], ("True", "128.000000"))
+        self.assertEqual(got[2], ("True", "138.000000"))
+        self.assertEqual(got[3], ("True", "100.000000"))
+        self.assertEqual(got[4][0], "False")
+        self.assertEqual(self.layer(xpm, 1)[0].find("OneShot").text, "True")      # nothing else changed
         shutil.rmtree(self.tmp / "out")
         xpm, _ = self.gen(pads, warp_bpm=False)
-        self.assertEqual(self.layer(xpm, 1)[0].find("WarpEnable").text, "False")
+        self.assertTrue(all(self.layer(xpm, p)[0].find("WarpEnable").text == "False" for p in (1, 2, 3, 4)))
+
+    def test_a_pad_assigned_a_loop_keyword_group_is_warped_even_without_loop_in_the_name(self):
+        self.make("pack/Groove 01.wav", 44100 * 4)            # 4 s = 2 bars at 120
+        self.make("pack/Hit.wav", 100)
+        kw = (self.tmp / "pack", ["loop", "groove"], None)
+        xpm, _ = self.gen({1: [kw]})
+        self.assertEqual(self.layer(xpm, 1)[0].find("WarpEnable").text, "True")
+        self.assertEqual(self.layer(xpm, 1)[0].find("WarpTempo").text, "120.000000")
+
+    def test_tempo_helpers(self):
+        self.assertEqual(kc.estimate_tempo(44100 * 4, 44100), 120.0)          # 2 bars
+        self.assertEqual(kc.estimate_tempo(int(44100 * 7.5), 44100), 128.0)    # 4 bars
+        self.assertIsNone(kc.estimate_tempo(44100 // 2, 44100))                # too short to be a loop
+        self.assertIsNone(kc.estimate_tempo(None, 44100))
+        self.assertEqual(kc.loop_tempo("Loop 140bpm.wav"), (140.0, "name"))
+        self.assertEqual(kc.loop_tempo("Loop 01.wav"), (None, None))           # nothing to go on
+        self.assertTrue(kc.looks_like_loop("Packs/Drum Loops/x.wav"))
+        self.assertFalse(kc.looks_like_loop("Packs/Kicks/k.wav"))
 
     def test_transposes_other_keys_to_the_kit_key_only_on_tonal_pads(self):
         self.make("Bass/Bass_D.wav")            # D -> C = -2
@@ -1356,20 +1378,25 @@ class LoopsWarpAndKey(unittest.TestCase):
         xpm, logs = self.gen(pads, match_key="C", transpose_key=True)
         self.assertEqual(self.layer(xpm, 1)[1].find("TuneCoarse").text, "-2")
         self.assertTrue(any("transposed to the key: 1" in l for l in logs), logs)
+        self.assertTrue(any("Transposed to C (pad, semitones): 1 (-2)" in l for l in logs), logs)
         shutil.rmtree(self.tmp / "out")
         xpm, _ = self.gen(pads, match_key="C")          # off: the old behavior, no tuning
         self.assertEqual(self.layer(xpm, 1)[1].find("TuneCoarse").text, "0")
 
-    def test_a_sample_already_in_the_key_is_preferred_and_not_tuned(self):
-        self.make("Bass/Bass_C.wav")
-        self.make("Bass/Bass_D.wav")
-        for seed_try in range(4):
-            out = self.tmp / f"o{seed_try}"
+    def test_transposition_draws_from_every_key_not_only_the_kit_key(self):
+        for k in ("C", "D", "E", "F", "G", "A"):
+            self.make(f"Bass/Bass_{k}.wav")
+        tunes = set()
+        for seed in range(12):
+            out = self.tmp / f"o{seed}"
             kc.generate_kits(kc.default_template(), out, 1, "K", {1: [self.tmp / "Bass"]}, log=lambda x: None,
-                             seed=seed_try, match_key="C", transpose_key=True)
+                             seed=seed, match_key="C", transpose_key=True)
             xpm = (out / "K" / "K.xpm").read_text(encoding="utf-8")
-            self.assertEqual(self.layer(xpm, 1)[1].find("TuneCoarse").text, "0")
-            self.assertEqual(sample_names(xpm)["1"], "Bass_C")
+            name = sample_names(xpm)["1"]
+            tunes.add((name, self.layer(xpm, 1)[1].find("TuneCoarse").text))
+        for name, tune in tunes:            # every sample lands on C
+            self.assertEqual(int(tune), kc.key_shift(name.split("_")[1], "C"), name)
+        self.assertGreater(len({n for n, _ in tunes}), 2)       # and not just the one already in C
 
 
 class GroupEditorApi(GroupColorApi):

@@ -20,7 +20,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -83,46 +83,56 @@ def key_shift(sample_key, target_key):
     return d - 12 if d > 5 else d
 
 
-def audio_frames(path):
-    """Number of sample frames of a .wav / .aif(f) file, read from its header (any WAV format,
-    including 24-bit, float and WAVE_FORMAT_EXTENSIBLE), or None when it can't be determined."""
+def audio_info(path):
+    """(frames, sample rate) of a .wav / .aif(f) file, read from its header (any WAV format,
+    including 24-bit, float and WAVE_FORMAT_EXTENSIBLE); (None, None) when unknown."""
     try:
         with open(path, "rb") as fh:
             head = fh.read(12)
             if len(head) < 12:
-                return None
+                return None, None
             kind = head[8:12]
             if head[:4] in (b"RIFF", b"RF64") and kind == b"WAVE":
-                channels = bits = 0
+                channels = bits = rate = 0
                 while True:
                     ch = fh.read(8)
                     if len(ch) < 8:
-                        return None
+                        return None, None
                     cid, size = ch[:4], int.from_bytes(ch[4:], "little")
                     if cid == b"fmt ":
                         fmt = fh.read(size + (size & 1))
                         channels = int.from_bytes(fmt[2:4], "little")
+                        rate = int.from_bytes(fmt[4:8], "little")
                         bits = int.from_bytes(fmt[14:16], "little")
                     elif cid == b"data":
                         if not channels or not bits:
-                            return None
+                            return None, None
                         if size in (0, 0xFFFFFFFF):          # streamed/RF64 header: use the file size
                             size = os.path.getsize(path) - fh.tell()
-                        return size // (channels * ((bits + 7) // 8))
+                        return size // (channels * ((bits + 7) // 8)), rate or None
                     else:
                         fh.seek(size + (size & 1), 1)
             if head[:4] == b"FORM" and kind in (b"AIFF", b"AIFC"):
                 while True:
                     ch = fh.read(8)
                     if len(ch) < 8:
-                        return None
+                        return None, None
                     cid, size = ch[:4], int.from_bytes(ch[4:], "big")
                     if cid == b"COMM":
-                        return int.from_bytes(fh.read(size)[2:6], "big")
+                        comm = fh.read(size)
+                        exp = int.from_bytes(comm[8:10], "big") & 0x7FFF      # 80-bit extended rate
+                        mant = int.from_bytes(comm[10:18], "big")
+                        rate = int(mant * 2 ** (exp - 16383 - 63)) if mant else None
+                        return int.from_bytes(comm[2:6], "big"), rate
                     fh.seek(size + (size & 1), 1)
-    except OSError:
-        return None
-    return None
+    except (OSError, OverflowError, ValueError):
+        return None, None
+    return None, None
+
+
+def audio_frames(path):
+    """Number of sample frames of a .wav / .aif(f) file, or None (see audio_info)."""
+    return audio_info(path)[0]
 
 
 BPM_RE = re.compile(r"(?<![\d.])(\d{2,3})(?:\.\d+)?\s*[-_ ]?bpm(?![a-z])|(?<![a-z])bpm\s*[-_ ]?(\d{2,3})(?![\d])", re.I)
@@ -149,6 +159,57 @@ def parse_bpm(path, frames=None, levels=3):
             if BPM_MIN <= v <= BPM_MAX:
                 return v
     return None
+
+
+LOOP_RE = re.compile(r"loop", re.I)
+BARE_TEMPO_RE = re.compile(r"(?<![A-Za-z0-9])([1-9]\d{1,2})(?![A-Za-z0-9])")
+
+
+def looks_like_loop(path, levels=3):
+    """True when the file name or one of its parent folders says "loop" ("Bass Loop", "Loops/")."""
+    p = Path(path)
+    return any(LOOP_RE.search(n) for n in [p.stem] + [q.name for q in list(p.parents)[:levels]])
+
+
+def estimate_tempo(frames, rate):
+    """Tempo (BPM) a loop most likely has, from its length alone: the loop is taken to be a whole
+    number of 4/4 bars (1, 2, 4, 8 ...) and the tempo is the one of those that falls in 90-180 BPM.
+    None when the length is unknown or isn't a plausible loop (under about 1.3 s)."""
+    if not frames or not rate:
+        return None
+    seconds = frames / rate
+    bars = 1
+    while bars <= 64:
+        bpm = 240.0 * bars / seconds
+        if 90 <= bpm < 180:
+            return round(bpm, 2)
+        bars *= 2
+    return None
+
+
+def loop_tempo(path, frames=None, rate=None):
+    """(tempo, source) for a loop: a tempo labelled in the name or folder ("128bpm") first; then a
+    bare number in the file name ("DPT_A#_138_Bass_Loop") if it agrees with the loop's length
+    (within 8 %, at the same or double/half speed) or the length is unknown; else the tempo estimated
+    from the length. source is "name", "number", "length" or None (no tempo could be found)."""
+    labelled = parse_bpm(path, frames)
+    if labelled:
+        return labelled, "name"
+    guess = estimate_tempo(frames, rate)
+    for tok in BARE_TEMPO_RE.findall(Path(path).stem):
+        v = float(tok)
+        if not 70 <= v <= 200:
+            continue
+        if guess is None:
+            return v, "number"
+        folded = v
+        while folded < 90:
+            folded *= 2
+        while folded >= 180:
+            folded /= 2
+        if abs(folded - guess) / guess <= 0.08:
+            return v, "number"
+    return (guess, "length") if guess else (None, None)
 
 
 # ---------------------------------------------------------------- pack / keyword mode
@@ -244,8 +305,9 @@ MSG = {
         "scan": "  {folder}: {n} samples",
         "empty": "  ! folder has no compatible samples (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads assigned",
-        "extras": "  Warp on: {warp} · transposed to the key: {tuned} · long samples with full length: {long}",
-        "h_nowarp": "do not turn Warp on for samples with a tempo (BPM) in their name",
+        "extras": "  Warp on (loops): {warp} · loops with no tempo found: {notempo} · transposed to the key: {tuned} · long samples with full length: {long}",
+        "tuned_pads": "  Transposed to {key} (pad, semitones): {pads}",
+        "h_nowarp": "do not turn Warp on for loops",
         "h_transpose": "with --match-key: pitch samples in another key to the kit's key instead of skipping them",
         "link_failed": "  ! Can't link samples ({why}). Hard links only work when the samples and the "
                        "output folder are on the SAME drive/volume and it supports them (not exFAT/FAT or "
@@ -290,8 +352,9 @@ MSG = {
         "scan": "  {folder}: {n} samples",
         "empty": "  ! carpeta sin samples compatibles (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads asignados",
-        "extras": "  Warp activado: {warp} · transpuestos a la tonalidad: {tuned} · samples largos con su duración completa: {long}",
-        "h_nowarp": "no activar Warp en los samples con tempo (BPM) en el nombre",
+        "extras": "  Warp activado (loops): {warp} · loops sin tempo encontrado: {notempo} · transpuestos a la tonalidad: {tuned} · samples largos con su duración completa: {long}",
+        "tuned_pads": "  Transpuestos a {key} (pad, semitonos): {pads}",
+        "h_nowarp": "no activar Warp en los loops",
         "h_transpose": "con --match-key: subir/bajar de tono los samples de otra tonalidad a la del kit en vez de descartarlos",
         "link_failed": "  ! No se pueden enlazar los samples ({why}). Los enlaces solo funcionan si los samples y "
                        "la carpeta de salida están en el MISMO disco/volumen y este los admite (no exFAT/FAT "
@@ -597,6 +660,16 @@ def _pad_sources(entries):
     return srcs, kw_for, ctx_for
 
 
+def _is_loop_pad(entries):
+    """True when a pad is assigned a keyword group that asks for loops (a positive "loop" or
+    "+loop" keyword, e.g. the default Loop, Loop Drums, Loop Bass groups)."""
+    for e in entries:
+        if isinstance(e, tuple) and len(e) > 1 and e[1]:
+            if any(k.strip().lstrip("+").lower() in ("loop", "loops") for k in e[1]):
+                return True
+    return False
+
+
 def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_folders=None,
                  fallback=None, unmatched=None, match_cache=None, transpose=False, tonal_pads=None):
     """Pick one sample per pad. With several folders on a pad, a folder is chosen first
@@ -621,8 +694,8 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
     appended to `fallback`) rather than leaving it empty.
 
     transpose=True (the caller will tune each sample to target_key, see key_shift) widens that
-    key-filtered pool from "samples in target_key" to "every sample with a detected key", while
-    still preferring those already in the key. `tonal_pads`, if a set, receives the pads where
+    key-filtered pool from "samples in target_key" to "every sample with a detected key" (chosen
+    at random from all of them, so the kit isn't limited to one key and gets variety). `tonal_pads`, if a set, receives the pads where
     the key filter applied: only those are meant to be transposed (a drum one-shot called
     "Kick A" must never be pitched)."""
     key_filtering = bool(target_key and tonal_folders)
@@ -681,10 +754,6 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
         if avail:
             src = rng.choice(avail)
             f = None
-            if transpose and target_key:        # a sample already in the key needs no pitch shift
-                near = [g for g in free[src] if parse_key(g.name) and key_shift(parse_key(g.name), target_key) == 0]
-                if near:
-                    f = rng.choice(near)
             if f is None:
                 f = rng.choice(free[src])
         else:                       # everything used: allow repeats
@@ -934,13 +1003,17 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
     An entry of pads[pad] may be a (Path, keywords[, context]) tuple instead of a plain Path to
     restrict that one pad to the samples of that folder belonging to a keyword group; see
     pick_samples and _matching_files.
-    warp_bpm (default on): a sample whose name (or parent folder) states its tempo — "128bpm",
-    "BPM 140" — gets Warp enabled on its pad with that tempo, so it follows the project's tempo.
+    warp_bpm (default on): every LOOP gets Warp enabled on its pad, so it follows the project's
+    tempo. A sample is a loop when its name or a parent folder says "loop", or when the pad is
+    assigned a keyword group that asks for loops (see _is_loop_pad). Its tempo is the one in the
+    name ("128bpm"), a bare number in the name ("DPT_A#_138_Bass_Loop") that agrees with the loop's
+    length, or else estimated from its length (see loop_tempo).
     Samples longer than the templates' default end marker also get their end set to their real
     length (otherwise long loops are cut off); that happens regardless of warp_bpm.
     transpose_key: with match_key, a sample whose detected key differs from the kit's is not
     skipped but pitched to the kit's key (coarse tune, see key_shift) — only on pads where the
-    key filter applies, and samples already in the key are preferred.
+    key filter applies. Samples are chosen at random among all keys (no preference for the one
+    already in the key); the log lists each transposed pad.
     flat_output: put every kit's .xpm and ALL samples directly in out_root instead of one
     subfolder per kit. The MPC's file browser can filter to show only kits, so a single folder
     is easier to browse. A sample already in the folder with the same name and identical content
@@ -1055,23 +1128,26 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
                 place(f, kit_dir / (stem + f.suffix.lower()))
 
         assignment = {pad: stems[f] for pad, f in chosen.items()}
-        extras, tuned, warped, long_n = {}, 0, 0, 0
+        extras, tuned, warped, long_n, no_tempo = {}, [], 0, 0, 0
         for pad, f in chosen.items():
             ex = {}
-            frames = audio_frames(f)
+            frames, rate = audio_info(f)
             if frames and frames > LONG_SAMPLE:
                 ex["frames"] = frames
                 long_n += 1
-            bpm = parse_bpm(f, frames) if warp_bpm else None
-            if bpm:
-                ex["bpm"] = bpm
-                warped += 1
+            if warp_bpm and (looks_like_loop(f) or _is_loop_pad(pads.get(pad, []))):
+                bpm, _src = loop_tempo(f, frames, rate)
+                if bpm:
+                    ex["bpm"] = bpm
+                    warped += 1
+                else:
+                    no_tempo += 1
             k = parse_key(f.name)
             if transpose_key and target_key and pad in tonal_pads and k:
                 shift = key_shift(k, target_key)
                 if shift:
                     ex["tune"] = shift
-                    tuned += 1
+                    tuned.append(f"{pad} ({shift:+d})")
             if ex:
                 extras[pad] = ex
         xpm = build_xpm(template, name, assignment, clear_others, mutegroups, extras)
@@ -1082,8 +1158,10 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
             log(msg("kit_key", name=name, n=len(assignment), key=target_key))
         else:
             log(msg("kit", name=name, n=len(assignment)))
-        if warped or tuned or long_n:
-            log(msg("extras", warp=warped, tuned=tuned, long=long_n))
+        if warped or tuned or long_n or no_tempo:
+            log(msg("extras", warp=warped, tuned=len(tuned), long=long_n, notempo=no_tempo))
+        if tuned:
+            log(msg("tuned_pads", pads=", ".join(tuned), key=target_key))
         if fallback_pads and target_key and not transpose_key:
             log(msg("key_fallback", key=target_key,
                     pads=", ".join(str(p) for p in sorted(set(fallback_pads)))))

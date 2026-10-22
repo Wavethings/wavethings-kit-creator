@@ -590,6 +590,10 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
 .padchokewrap{position:absolute;bottom:4px;right:5px}
 .padchoke{font-size:9px;font-weight:700;line-height:1;padding:2px 4px;border-radius:7px;background:#000b;color:#fff;border:1px solid #fff8;cursor:pointer;text-shadow:none;box-shadow:none}
 .padchoke:hover{background:#000}.padchoke.dim{opacity:.7}
+#opt>div{width:min(640px,94vw);max-height:90vh;display:flex;flex-direction:column;padding:18px}
+#opt h3{margin:0 0 6px;font-size:17px}#optBody{overflow:auto;flex:1;padding-right:6px}
+#opt h4{margin:16px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mu);border-bottom:1px solid var(--ln);padding-bottom:4px}
+#opt h4:first-child{margin-top:6px}
 #kw>div{width:min(940px,96vw);max-height:92vh;display:flex;flex-direction:column;padding:18px}
 #kw h3{margin:0 0 4px;font-size:17px}
 #kwRows{overflow:auto;flex:1;min-height:120px;margin:10px 0;padding-right:4px}
@@ -624,19 +628,7 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
   <div class="row"><label data-i18n="lbl_kits"></label><input type="number" min="1" id="kits" style="width:90px">
    <label style="width:auto;margin-left:10px" data-i18n="lbl_name"></label><input type="text" id="name"></div>
   <div class="row"><label data-i18n="lbl_seed"></label><input type="text" id="seed" data-ph="ph_seed"></div>
-  <label class="chk"><input type="checkbox" id="recursive"><span data-i18n="chk_recursive"></span></label>
-  <label class="chk"><input type="checkbox" id="clear"><span data-i18n="chk_clear"></span></label>
-  <label class="chk"><input type="checkbox" id="warpBpm"><span data-i18n="chk_warp"></span></label>
-  <div class="hint" data-i18n="hint_warp"></div>
-  <label class="chk"><input type="checkbox" id="hardlink"><span data-i18n="chk_hardlink"></span></label>
-  <label class="chk"><input type="checkbox" id="matchKeyOn"><span data-i18n="chk_matchkey"></span></label>
-  <div class="row" id="matchKeyRow" style="display:none;margin:0 0 8px"><label data-i18n="lbl_matchkey"></label><select class="big" id="matchKeySel" style="flex:1"></select></div>
-  <div class="hint" id="matchKeyHint" data-i18n="hint_matchkey"></div>
-  <label class="chk" id="transposeRow"><input type="checkbox" id="transposeKey"><span data-i18n="chk_transpose"></span></label>
-  <label class="chk"><input type="checkbox" id="flatOutput"><span data-i18n="chk_flat"></span></label>
-  <div class="hint" data-i18n="hint_flat"></div>
-  <label class="chk"><input type="checkbox" id="padNumbering"><span data-i18n="chk_padnum"></span></label>
-  <div class="hint" data-i18n="hint_padnum"></div>
+  <div class="row" style="margin-top:4px"><button onclick="openOpts()" data-i18n="btn_options"></button><span id="optSum" class="hint" style="margin:0"></span></div>
   <div class="row" style="margin-top:12px"><button class="pri" id="go" onclick="generate()" data-i18n="btn_go"></button><span id="msg"></span></div>
   <pre id="log" style="display:none"></pre>
  </section>
@@ -658,6 +650,28 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
  <b id="palTitle"></b><div class="sw" id="sw"></div>
  <div class="row"><button id="btnNocolor" onclick="setColor(0)"></button><button id="btnImport" onclick="importColors()" data-i18n="btn_import"></button></div>
  <div class="hint" id="palHint"></div>
+</div></div>
+<div id="opt" class="ovl" onclick="if(event.target===this)closeOpts()"><div>
+ <h3 data-i18n="opt_title"></h3>
+ <div id="optBody">
+  <h4 data-i18n="opt_sec_samples"></h4>
+  <label class="chk"><input type="checkbox" id="recursive"><span data-i18n="chk_recursive"></span></label>
+  <label class="chk"><input type="checkbox" id="warpBpm"><span data-i18n="chk_warp"></span></label>
+  <div class="hint" data-i18n="hint_warp"></div>
+  <label class="chk"><input type="checkbox" id="clear"><span data-i18n="chk_clear"></span></label>
+  <h4 data-i18n="opt_sec_key"></h4>
+  <label class="chk"><input type="checkbox" id="matchKeyOn"><span data-i18n="chk_matchkey"></span></label>
+  <div class="row" id="matchKeyRow" style="display:none;margin:0 0 8px"><label data-i18n="lbl_matchkey"></label><select class="big" id="matchKeySel" style="flex:1"></select></div>
+  <label class="chk" id="transposeRow"><input type="checkbox" id="transposeKey"><span data-i18n="chk_transpose"></span></label>
+  <div class="hint" id="matchKeyHint" data-i18n="hint_matchkey"></div>
+  <h4 data-i18n="opt_sec_output"></h4>
+  <label class="chk"><input type="checkbox" id="flatOutput"><span data-i18n="chk_flat"></span></label>
+  <div class="hint" data-i18n="hint_flat"></div>
+  <label class="chk"><input type="checkbox" id="hardlink"><span data-i18n="chk_hardlink"></span></label>
+  <label class="chk"><input type="checkbox" id="padNumbering"><span data-i18n="chk_padnum"></span></label>
+  <div class="hint" data-i18n="hint_padnum"></div>
+ </div>
+ <div class="row" style="justify-content:flex-end;margin:12px 0 0"><button class="pri" onclick="closeOpts()" data-i18n="opt_close"></button></div>
 </div></div>
 <div id="chk" class="ovl" onclick="if(event.target===this)this.style.display='none'"><div style="width:min(380px,92vw)">
  <b id="chkTitle"></b><div class="hint" data-i18n="hint_choke_pad"></div>
@@ -684,16 +698,18 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  hint_folders:"1) Add folders (⌘-click to pick several, or a parent folder to add all its subfolders) · 2) select one · 3) click the pads on the right to assign it. The folder's color is applied to its pads on the MPC. “Choke” = mute group: pads of folders with the same number cut each other off (e.g. closed and open hi-hat).",
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
  lbl_folder:"Folder",btn_choose:"Choose…",lbl_kits:"No. of kits",lbl_name:"Name",lbl_seed:"Seed",ph_seed:"(optional) same seed = same kits",
- chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_warp:"Warp samples with a tempo (BPM) in their name",
- hint_warp:"A sample or loop whose name — or, for long samples, whose folder — says its tempo (“128bpm”, “BPM 140”, “Drums 174 BPM”) gets Warp switched on with that tempo, so it follows the project's tempo. Bare numbers like “122-Kick” are ignored. Samples longer than about 6.8 s also get their end set to their real end, so long loops are no longer cut.",
- chk_transpose:"Transpose samples in other keys to the kit's key",
+ chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",btn_options:"⚙ Options…",opt_title:"Options",opt_close:"Done",opt_sec_samples:"Samples",opt_sec_key:"Key",opt_sec_output:"Output",
+ opt_sum_none:"Default options",opt_warp:"Warp loops",opt_key:"key {0}",opt_transpose:"transposing",opt_flat:"one folder",opt_link:"linking",opt_padnum:"pad numbering",opt_norec:"no subfolders",opt_keep:"keep other pads",
+ chk_warp:"Warp loops (follow the project's tempo)",
+ hint_warp:"Every loop gets Warp switched on, so it follows the project's tempo. A sample is a loop when its name or folder says “loop”, or when its pad uses a Loop keyword group. The tempo is taken from the name (“128bpm”, or a bare number like “DPT_A#_138_Bass_Loop” if it fits the loop's length); if there is none, it is estimated from the loop's length (whole 4/4 bars, 90–180 BPM). One-shots are never warped. Samples longer than about 6.8 s also get their end set to their real end, so long loops are no longer cut.",
+ chk_transpose:"Transpose samples in other keys to the kit's key instead of skipping them",
  chk_hardlink:"Link samples instead of copying (same drive only)",
  chk_flat:"All kits and samples in one folder",
  hint_flat:"Instead of one folder per kit, every .xpm and all samples go straight into the output folder. Easier to browse on the MPC, whose file browser can filter to show only kits. A sample that is already there with identical content is shared by the kits; a different file with the same name gets a numeric suffix. Nothing existing is overwritten.",
  chk_padnum:"Number samples by pad (for Maschine and others)",
  hint_padnum:"Prefixes every output sample with its pad number (e.g. \"001_Kick.wav\"), so sorting the kit folder by name also sorts it by pad. Lets samplers with no .xpm support of their own import the kit too: select a bank's 16 files together in Finder/Explorer (already in order) and drop them onto the sampler's first pad — Maschine, Battery and most hardware samplers auto-assign one file per pad from there.",
- chk_matchkey:"Filter by key",lbl_matchkey:"Key",key_random:"Random per kit",
- hint_matchkey:"Reads the root note from file names (e.g. \"Bass_C1\", \"Synth_Dm\", \"Lead - F#3\") and, when a folder has that information, keeps every kit's samples in one key. Folders without a detected key (drums, for example) are never filtered. Detection is best-effort and may miss or misread some names; add {key} to the name pattern above to show each kit's key. Filterable folders show a 🎵 badge.",
+ chk_matchkey:"Give each kit one key",lbl_matchkey:"Key",key_random:"Random per kit",
+ hint_matchkey:"Reads the root note from file names (e.g. \"Bass_C1\", \"Synth_Dm\", \"Lead - F#3\") and, when a folder has that information, keeps every kit's samples in one key. Folders without a detected key (drums, for example) are never filtered. Detection is best-effort and may miss or misread some names; add {key} to the name pattern above to show each kit's key. Filterable folders show a 🎵 badge. With the option below, samples in other keys are not skipped but pitched to the kit's key (relative keys count as the same: Am = C), and the log lists each transposed pad. Drums are not touched.",
  hint_matchkey_off:"No folder has a detected key yet — add \"C1\", \"Dm\", \"F#\" and the like to your file names to use this filter.",
  key_badge:"🎵 {0}/{1} tagged · {2}",
  pack_toggle:"Pack",pack_toggle_title:"Unsorted pack: pads linked to it show a dropdown to pick a keyword group instead of using the whole folder",
@@ -737,16 +753,18 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  hint_folders:"1) Añade carpetas (⌘-clic para elegir varias, o una carpeta madre para añadir todas sus subcarpetas) · 2) selecciona una · 3) pulsa los pads de la derecha para asignársela. El color de la carpeta se aplica a sus pads en la MPC. “Choke” = grupo de choque: los pads de carpetas con el mismo número se cortan entre sí (p. ej. hi-hat cerrado y abierto).",
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
  lbl_folder:"Carpeta",btn_choose:"Elegir…",lbl_kits:"Nº de kits",lbl_name:"Nombre",lbl_seed:"Semilla",ph_seed:"(opcional) misma semilla = mismos kits",
- chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_warp:"Warp en los samples con tempo (BPM) en el nombre",
- hint_warp:"Un sample o loop cuyo nombre —o, si es largo, su carpeta— indica el tempo («128bpm», «BPM 140», «Drums 174 BPM») recibe Warp activado con ese tempo, así sigue el tempo del proyecto. Los números sueltos como «122-Kick» se ignoran. Los samples de más de unos 6,8 s también tienen su final en su final real, así los loops largos ya no se cortan.",
- chk_transpose:"Transponer a la tonalidad del kit los samples de otras tonalidades",
+ chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",btn_options:"⚙ Opciones…",opt_title:"Opciones",opt_close:"Hecho",opt_sec_samples:"Samples",opt_sec_key:"Tonalidad",opt_sec_output:"Salida",
+ opt_sum_none:"Opciones por defecto",opt_warp:"Warp en loops",opt_key:"tonalidad {0}",opt_transpose:"transponiendo",opt_flat:"una carpeta",opt_link:"enlazando",opt_padnum:"numeración de pads",opt_norec:"sin subcarpetas",opt_keep:"conservar otros pads",
+ chk_warp:"Warp en los loops (siguen el tempo del proyecto)",
+ hint_warp:"Todos los loops reciben Warp activado, así siguen el tempo del proyecto. Un sample es un loop si su nombre o su carpeta dice «loop», o si su pad usa un grupo de palabras clave de Loop. El tempo se toma del nombre («128bpm», o un número suelto como «DPT_A#_138_Bass_Loop» si encaja con la duración del loop); si no hay, se estima por la duración del loop (compases de 4/4 enteros, 90–180 BPM). Los one-shots nunca llevan Warp. Los samples de más de unos 6,8 s también tienen su final en su final real, así los loops largos ya no se cortan.",
+ chk_transpose:"Transponer a la tonalidad del kit los samples de otras tonalidades en vez de descartarlos",
  chk_hardlink:"Enlazar samples en vez de copiar (solo en el mismo disco)",
  chk_flat:"Todos los kits y samples en una sola carpeta",
  hint_flat:"En lugar de una carpeta por kit, todos los .xpm y los samples van directamente a la carpeta de salida. Más cómodo en la MPC, cuyo navegador puede filtrar para mostrar solo kits. Un sample que ya esté allí con el mismo contenido se comparte entre kits; un archivo distinto con el mismo nombre recibe un sufijo numérico. No se sobrescribe nada existente.",
  chk_padnum:"Numerar samples por pad (para Maschine y otros)",
  hint_padnum:"Añade el número de pad delante de cada muestra de salida (p. ej. \"001_Kick.wav\"), para que ordenar la carpeta del kit por nombre también la ordene por pad. Así, un sampler sin soporte propio de .xpm puede importar el kit igualmente: selecciona juntos los 16 archivos de un banco en el Finder/Explorador (ya están en orden) y suéltalos sobre el primer pad del sampler — Maschine, Battery y la mayoría de samplers hardware asignan uno por pad a partir de ahí.",
- chk_matchkey:"Filtrar por tonalidad",lbl_matchkey:"Tonalidad",key_random:"Aleatoria por kit",
- hint_matchkey:"Lee la nota raíz en el nombre del archivo (p. ej. \"Bass_C1\", \"Synth_Dm\", \"Lead - F#3\") y, cuando una carpeta tiene esa información, usa siempre la misma tonalidad dentro de cada kit. Las carpetas sin tonalidad detectada (batería, por ejemplo) nunca se filtran. La detección es aproximada y puede fallar con algunos nombres; añade {key} al patrón de nombre de arriba para mostrar la tonalidad de cada kit. Las carpetas filtrables llevan una insignia 🎵.",
+ chk_matchkey:"Dar una tonalidad a cada kit",lbl_matchkey:"Tonalidad",key_random:"Aleatoria por kit",
+ hint_matchkey:"Lee la nota raíz en el nombre del archivo (p. ej. \"Bass_C1\", \"Synth_Dm\", \"Lead - F#3\") y, cuando una carpeta tiene esa información, usa siempre la misma tonalidad dentro de cada kit. Las carpetas sin tonalidad detectada (batería, por ejemplo) nunca se filtran. La detección es aproximada y puede fallar con algunos nombres; añade {key} al patrón de nombre de arriba para mostrar la tonalidad de cada kit. Las carpetas filtrables llevan una insignia 🎵. Con la opción de abajo, los samples de otras tonalidades no se descartan sino que se suben o bajan de tono a la del kit (las relativas cuentan como la misma: Am = C), y el registro lista cada pad transpuesto. Los drums no se tocan.",
  hint_matchkey_off:"Ninguna carpeta tiene tonalidad detectada todavía — añade \"C1\", \"Dm\", \"F#\" o similar a los nombres de archivo para usar este filtro.",
  key_badge:"🎵 {0}/{1} con tonalidad · {2}",
  pack_toggle:"Pack",pack_toggle_title:"Pack sin ordenar: los pads vinculados a él muestran un desplegable para elegir un grupo de palabras clave en vez de usar la carpeta entera",
@@ -988,7 +1006,7 @@ async function kwReset(){
   if(!(await uiConfirm(t("kw_reset_confirm"))))return;
   const r=await api("/api/groups",{action:"reset"});if(r.error)return;
   applyGroups(r,{});KW=Object.entries(r.groups).map(([n,k])=>({id:++kwSeq,orig:n,name:n,kw:k.join(", ")}));kwRender();kwCounts();rescanAll()}
-addEventListener("keydown",e=>{if(e.key==="Escape"&&$("chk").style.display==="flex")$("chk").style.display="none";if(e.key==="Escape"&&$("kw").style.display==="flex"&&$("dlg").style.display!=="flex")kwClose()});
+addEventListener("keydown",e=>{if(e.key==="Escape"&&$("chk").style.display==="flex")$("chk").style.display="none";if(e.key==="Escape"&&$("opt").style.display==="flex"&&$("dlg").style.display!=="flex")closeOpts();if(e.key==="Escape"&&$("kw").style.display==="flex"&&$("dlg").style.display!=="flex")kwClose()});
 async function editGroupsFile(){const r=await api("/api/edit_groups",{});if(r.error)await uiAlert(r.error)}
 function folderChoke(n){const e=(S.padmap[n]||[])[0],f=e&&S.folders.find(x=>x.id===entryId(e));return f?(f.mute||0):0}
 const padChokeOf=n=>S.padChoke[n]!==undefined?S.padChoke[n]:folderChoke(n);
@@ -998,7 +1016,14 @@ function openChoke(n){const cur=S.padChoke[n];
    Array.from({length:32},(_,i)=>`<button class="${cur===i+1?"sel":""}" title="${esc(t("choke_n",i+1))}" onclick="setPadChoke(${n},${i+1})">${i+1}</button>`).join("");
   $("chk").style.display="flex"}
 function setPadChoke(n,v){if(v===null)delete S.padChoke[n];else S.padChoke[n]=v;$("chk").style.display="none";render();save()}
+function openOpts(){$("opt").style.display="flex"}
+function closeOpts(){$("opt").style.display="none"}
+function optSummary(){const o=[];if(S.warpBpm)o.push(t("opt_warp"));
+  if(S.matchKey){o.push(t("opt_key",S.matchKey==="random"?t("key_random").toLowerCase():S.matchKey));if(S.transposeKey)o.push(t("opt_transpose"))}
+  if(S.flatOutput)o.push(t("opt_flat"));if(S.hardlink)o.push(t("opt_link"));if(S.padNumbering)o.push(t("opt_padnum"));
+  if(!S.recursive)o.push(t("opt_norec"));if(!S.clear)o.push(t("opt_keep"));return o.join(" · ")||t("opt_sum_none")}
 function render(){
+  $("optSum").textContent=optSummary();
   if(!S.padChoke||typeof S.padChoke!=="object")S.padChoke={};
   for(const k in S.padChoke)if(!(S.padmap[k]||[]).length)delete S.padChoke[k];
   $("lang").value=LANG;$("btnClear").disabled=$("btnRescan").disabled=!S.folders.length;
