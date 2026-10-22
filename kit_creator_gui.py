@@ -571,7 +571,8 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
 .kwr{display:grid;grid-template-columns:30px 170px 1fr 54px 30px;gap:6px;align-items:center;margin-bottom:6px}
 .kwr input{font-family:var(--mono);font-size:13px}
 .kwr .cnt{font-size:12px;color:var(--mu);text-align:right}.kwr .cnt.zero{color:#e5493d;font-weight:600}
-.kwr .mv{display:flex;flex-direction:column;gap:1px}.kwr .mv button{padding:0 4px;font-size:9px;line-height:12px;box-shadow:none}
+.kwr .grip{cursor:grab;text-align:center;font-size:20px;line-height:1;color:var(--mu);user-select:none;touch-action:none;padding:6px 0;border-radius:6px}.kwr .grip:hover,.kwr .grip:focus-visible{background:var(--btn);color:var(--tx);outline:none}
+.kwr.dragging{opacity:.9;background:var(--cardon);border-radius:8px;box-shadow:0 6px 18px #0006;position:relative;z-index:2}.kwr.dragging .grip{cursor:grabbing}
 .kwr.hd{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mu);margin:0}
 .kwr input.bad{border-color:#e5493d}
 .kwbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.kwbar .sp{flex:1}
@@ -651,7 +652,7 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  hint_folders:"1) Add folders (⌘-click to pick several, or a parent folder to add all its subfolders) · 2) select one · 3) click the pads on the right to assign it. The folder's color is applied to its pads on the MPC. “Choke” = mute group: pads of folders with the same number cut each other off (e.g. closed and open hi-hat).",
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
  lbl_folder:"Folder",btn_choose:"Choose…",lbl_kits:"No. of kits",lbl_name:"Name",lbl_seed:"Seed",ph_seed:"(optional) same seed = same kits",
- chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_hardlink:"Link samples instead of copying (saves space)",
+ chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_hardlink:"Link samples instead of copying (same drive only)",
  chk_flat:"All kits and samples in one folder",
  hint_flat:"Instead of one folder per kit, every .xpm and all samples go straight into the output folder. Easier to browse on the MPC, whose file browser can filter to show only kits. A sample that is already there with identical content is shared by the kits; a different file with the same name gets a numeric suffix. Nothing existing is overwritten.",
  chk_padnum:"Number samples by pad (for Maschine and others)",
@@ -672,11 +673,11 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  group_color_title:"Set a color for every pad using “{0}”",
  btn_editgroups:"✎ Edit keyword groups",title_editgroups:"Edit the keyword groups here, or open keyword_groups.txt in a text editor",
  theme_dark:"Dark",theme_light:"Light",theme_mpc:"Classic MPC",
- kw_title:"Keyword groups",kw_sub:"Each group is a pad type for Pack mode. Separate keywords with commas.",
+ kw_title:"Keyword groups",kw_sub:"Each group is a pad type for Pack mode. Separate keywords with commas. Drag ⠿ to reorder.",
  kw_help_btn:"Syntax help",kw_help:"word  → the sample's folder or file name contains it (case-insensitive).\n-word  → exclusion: a sample containing it never goes in this group (“-loop” keeps loops out of one-shot groups).\n+word  → requirement: it must contain it (“Loop Bass: +loop, bass, sub” = loops that also say bass or sub).\nShort words (up to 3-4 letters, like sd, cp, hh) only match as whole words. The order here is the order of the pad dropdown.",
  kw_test:"Count samples in:",kw_test_none:"(no Pack folder)",kw_add:"＋ Add group",kw_reset:"Restore defaults",kw_openfile:"Open as text file",kw_save:"Save groups",
  kw_col_name:"Group",kw_col_words:"Keywords",kw_name_ph:"Group name",kw_words_ph:"kick, kik, bd, -loop",kw_del:"Delete group",
- kw_up:"Move up",kw_down:"Move down",
+ kw_drag:"Drag to reorder (or Alt+↑/↓)",
  kw_reset_confirm:"Replace all your groups with the built-in defaults? Your current file is kept as keyword_groups.txt.bak.",
  kw_used_confirm:"{0} pad assignment(s) use groups you deleted or renamed to something unknown. They will go back to “whole pack”. Continue?",
  kw_saved:"{0} keyword group(s) saved",
@@ -699,7 +700,7 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  hint_folders:"1) Añade carpetas (⌘-clic para elegir varias, o una carpeta madre para añadir todas sus subcarpetas) · 2) selecciona una · 3) pulsa los pads de la derecha para asignársela. El color de la carpeta se aplica a sus pads en la MPC. “Choke” = grupo de choque: los pads de carpetas con el mismo número se cortan entre sí (p. ej. hi-hat cerrado y abierto).",
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
  lbl_folder:"Carpeta",btn_choose:"Elegir…",lbl_kits:"Nº de kits",lbl_name:"Nombre",lbl_seed:"Semilla",ph_seed:"(opcional) misma semilla = mismos kits",
- chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_hardlink:"Enlazar samples en vez de copiar (ahorra espacio)",
+ chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_hardlink:"Enlazar samples en vez de copiar (solo en el mismo disco)",
  chk_flat:"Todos los kits y samples en una sola carpeta",
  hint_flat:"En lugar de una carpeta por kit, todos los .xpm y los samples van directamente a la carpeta de salida. Más cómodo en la MPC, cuyo navegador puede filtrar para mostrar solo kits. Un sample que ya esté allí con el mismo contenido se comparte entre kits; un archivo distinto con el mismo nombre recibe un sufijo numérico. No se sobrescribe nada existente.",
  chk_padnum:"Numerar samples por pad (para Maschine y otros)",
@@ -720,11 +721,11 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  group_color_title:"Fija un color para todos los pads que usan «{0}»",
  btn_editgroups:"✎ Editar grupos de palabras clave",title_editgroups:"Edita los grupos aquí, o abre keyword_groups.txt en un editor de texto",
  theme_dark:"Oscuro",theme_light:"Claro",theme_mpc:"MPC clásico",
- kw_title:"Grupos de palabras clave",kw_sub:"Cada grupo es un tipo de pad para el modo Pack. Separa las palabras con comas.",
+ kw_title:"Grupos de palabras clave",kw_sub:"Cada grupo es un tipo de pad para el modo Pack. Separa las palabras con comas. Arrastra ⠿ para reordenar.",
  kw_help_btn:"Ayuda de sintaxis",kw_help:"palabra  → el nombre de la carpeta o del archivo la contiene (sin distinguir mayúsculas).\n-palabra  → exclusión: una muestra que la contenga nunca entra en este grupo («-loop» deja los loops fuera de los grupos de one-shots).\n+palabra  → requisito: debe contenerla («Loop Bass: +loop, bass, sub» = loops que además dicen bass o sub).\nLas palabras cortas (hasta 3-4 letras, como sd, cp, hh) solo coinciden como palabra completa. El orden de aquí es el del desplegable de los pads.",
  kw_test:"Contar muestras en:",kw_test_none:"(sin carpeta Pack)",kw_add:"＋ Añadir grupo",kw_reset:"Restaurar valores",kw_openfile:"Abrir como archivo de texto",kw_save:"Guardar grupos",
  kw_col_name:"Grupo",kw_col_words:"Palabras clave",kw_name_ph:"Nombre del grupo",kw_words_ph:"kick, kik, bd, -loop",kw_del:"Borrar grupo",
- kw_up:"Subir",kw_down:"Bajar",
+ kw_drag:"Arrastra para reordenar (o Alt+↑/↓)",
  kw_reset_confirm:"¿Sustituir todos tus grupos por los predeterminados? Tu archivo actual se guarda como keyword_groups.txt.bak.",
  kw_used_confirm:"{0} asignación(es) de pads usan grupos que has borrado o renombrado a algo desconocido. Volverán a «todo el pack». ¿Continuar?",
  kw_saved:"{0} grupo(s) de palabras clave guardados",
@@ -878,12 +879,29 @@ function kwClose(){$("kw").style.display="none"}
 function kwRender(){
   $("kwRows").innerHTML=`<div class="kwr hd"><span></span><span>${esc(t("kw_col_name"))}</span><span>${esc(t("kw_col_words"))}</span><span></span><span></span></div>`+
    KW.map((g,i)=>`<div class="kwr" data-id="${g.id}">
-    <span class="mv"><button title="${esc(t("kw_up"))}" onclick="kwMove(${i},-1)">▲</button><button title="${esc(t("kw_down"))}" onclick="kwMove(${i},1)">▼</button></span>
+    <span class="grip" tabindex="0" title="${esc(t("kw_drag"))}" onpointerdown="kwDrag(event,${g.id})" onkeydown="kwKey(event,${i})">⠿</span>
     <input type="text" value="${esc(g.name)}" placeholder="${esc(t("kw_name_ph"))}" oninput="kwEdit(${g.id},'name',this.value)">
     <input type="text" value="${esc(g.kw)}" placeholder="${esc(t("kw_words_ph"))}" oninput="kwEdit(${g.id},'kw',this.value)">
     <span class="cnt" id="kc${g.id}"></span>
     <button title="${esc(t("kw_del"))}" onclick="kwDel(${g.id})">✕</button></div>`).join("")}
 function kwEdit(id,k,v){const g=KW.find(x=>x.id===id);g[k]=v;clearTimeout(kwT);kwT=setTimeout(kwCounts,500)}
+function kwDrag(e,id){
+  if(e.button!==undefined&&e.button!==0)return;e.preventDefault();
+  const box=$("kwRows"),row=box.querySelector(`.kwr[data-id="${id}"]`);row.classList.add("dragging");
+  let y=e.clientY,raf=0;
+  const place=()=>{const others=[...box.querySelectorAll(".kwr:not(.hd):not(.dragging)")];
+    const next=others.find(r=>{const b=r.getBoundingClientRect();return y<b.top+b.height/2});
+    if(next)box.insertBefore(row,next);else box.appendChild(row)};
+  const tick=()=>{const b=box.getBoundingClientRect();     // scroll the list while dragging near its edges
+    if(y<b.top+30)box.scrollTop-=12;else if(y>b.bottom-30)box.scrollTop+=12;place();raf=requestAnimationFrame(tick)};
+  const mv=ev=>{y=ev.clientY;place()};
+  const up=()=>{removeEventListener("pointermove",mv);removeEventListener("pointerup",up);removeEventListener("pointercancel",up);
+    cancelAnimationFrame(raf);row.classList.remove("dragging");
+    const order=[...box.querySelectorAll(".kwr:not(.hd)")].map(r=>+r.dataset.id);
+    KW.sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));kwRender();kwCounts()};
+  addEventListener("pointermove",mv);addEventListener("pointerup",up);addEventListener("pointercancel",up);raf=requestAnimationFrame(tick)}
+function kwKey(e,i){if(!e.altKey&&!e.shiftKey)return;if(e.key==="ArrowUp"||e.key==="ArrowDown"){e.preventDefault();kwMove(i,e.key==="ArrowUp"?-1:1);
+  const r=$("kwRows").querySelectorAll(".kwr:not(.hd) .grip")[Math.max(0,Math.min(KW.length-1,i+(e.key==="ArrowUp"?-1:1)))];if(r)r.focus()}}
 function kwMove(i,d){const j=i+d;if(j<0||j>=KW.length)return;[KW[i],KW[j]]=[KW[j],KW[i]];kwRender();kwCounts()}
 function kwDel(id){KW=KW.filter(g=>g.id!==id);kwRender();kwCounts()}
 function kwAdd(){KW.push({id:++kwSeq,orig:"",name:"",kw:""});kwRender();kwCounts();

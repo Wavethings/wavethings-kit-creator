@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.10.2] - 2026-10-22
+
+### Changed
+- Keyword-group editor: groups are now reordered by **dragging** the ⠿ handle (the list scrolls
+  by itself near the edges). Keyboard: focus the handle and press Alt+↑ / Alt+↓.
+
+## [1.10.1] - 2026-10-22
+
+### Fixed
+- "Link samples instead of copying" silently fell back to copying whenever linking wasn't possible,
+  so it looked like it did nothing. Links (hard links) only work when the samples and the output
+  folder are on the **same drive/volume** and the format supports them (not exFAT/FAT or network
+  shares). The log now says so once, with the system's reason, and ends with
+  "Samples: N linked, M copied". The option's label says "same drive only". An existing file in the
+  destination is replaced instead of making the link fail.
+
 ## [1.10.0] - 2026-10-21
 
 ### Added

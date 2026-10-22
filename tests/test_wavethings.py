@@ -99,6 +99,23 @@ class Generation(unittest.TestCase):
                          colors={1: 0x7F0000, 3: 0x007F00, 4: 0x007F00}, mutegroups={3: 1, 4: 1}, **kw)
         return logs
 
+    def test_hardlink_really_links_and_reports(self):
+        out = self.tmp / "lnk"
+        logs = self.gen(out, hardlink=True)
+        found = list(out.rglob("k?.wav"))                                   # kicks (picked at random)
+        self.assertTrue(found)
+        for p in found:                                                     # same file, no extra space
+            self.assertTrue(os.path.samefile(p, self.tmp / "lib" / "Kicks" / p.name))
+        self.assertTrue(any("linked" in l and "0 copied" in l for l in logs), logs)
+
+    def test_hardlink_that_cannot_link_copies_and_says_why(self):
+        out = self.tmp / "cpy"
+        with mock.patch.object(kc.os, "link", side_effect=OSError(18, "Invalid cross-device link")):
+            logs = self.gen(out, hardlink=True)
+        self.assertTrue(list(out.rglob("k?.wav")))                            # still produced
+        self.assertEqual(sum("Invalid cross-device link" in l for l in logs), 1)   # warned once, not per file
+        self.assertTrue(any("0 linked" in l for l in logs), logs)
+
     def test_generates_kits_with_samples_next_to_xpm(self):
         out = self.tmp / "out"
         self.gen(out, seed=1)
@@ -164,7 +181,7 @@ class Languages(unittest.TestCase):
     def test_engine_messages_match_between_languages(self):
         self.assertEqual(set(kc.MSG["en"]), set(kc.MSG["es"]))
         for k in kc.MSG["en"]:
-            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g")
+            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1)
             if k != "h_name":
                 kc.MSG["en"][k].format(**kw)
                 kc.MSG["es"][k].format(**kw)

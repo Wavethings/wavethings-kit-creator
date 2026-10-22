@@ -20,7 +20,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.10.0"
+__version__ = "1.10.2"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -165,6 +165,10 @@ MSG = {
         "scan": "  {folder}: {n} samples",
         "empty": "  ! folder has no compatible samples (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads assigned",
+        "link_failed": "  ! Can't link samples ({why}). Hard links only work when the samples and the "
+                       "output folder are on the SAME drive/volume and it supports them (not exFAT/FAT or "
+                       "network shares). Copying those files instead.",
+        "link_summary": "Samples: {linked} linked, {copied} copied.",
         "done": "\nDone: {n} kit(s) in {out}",
         "no_pads": "No pads assigned",
         "err_no_pads": "Pad assignments are missing (--pad or config file)",
@@ -204,6 +208,10 @@ MSG = {
         "scan": "  {folder}: {n} samples",
         "empty": "  ! carpeta sin samples compatibles (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads asignados",
+        "link_failed": "  ! No se pueden enlazar los samples ({why}). Los enlaces solo funcionan si los samples y "
+                       "la carpeta de salida están en el MISMO disco/volumen y este los admite (no exFAT/FAT "
+                       "ni carpetas de red). Se copian esos archivos.",
+        "link_summary": "Samples: {linked} enlazados, {copied} copiados.",
         "done": "\nListo: {n} kit(s) en {out}",
         "no_pads": "No hay pads asignados",
         "err_no_pads": "Faltan las asignaciones de pads (--pad o archivo de configuración)",
@@ -833,14 +841,22 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
 
     match_cache, flat_map = {}, {}
 
+    link_stats = {"linked": 0, "copied": 0, "why": None}
+
     def place(f, dest):
         if hardlink:
             try:
+                if os.path.lexists(dest):
+                    os.remove(dest)           # os.link refuses to replace an existing file
                 os.link(f, dest)
+                link_stats["linked"] += 1
                 return
-            except OSError:
-                pass
+            except OSError as e:              # other drive, exFAT/FAT/network share, no permission...
+                if link_stats["why"] is None:
+                    link_stats["why"] = e.strerror or str(e)
+                    log(msg("link_failed", why=link_stats["why"]))
         shutil.copy2(f, dest)
+        link_stats["copied"] += 1
 
     def flat_stem(f, stem):
         """Name to store `f` under in the shared folder: `stem` if free or already holding an
@@ -906,6 +922,8 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
                     pads=", ".join(str(p) for p in sorted(set(fallback_pads)))))
         if unmatched_pads:
             log(msg("kw_unmatched", pads=", ".join(str(p) for p in sorted(set(unmatched_pads)))))
+    if hardlink:
+        log(msg("link_summary", linked=link_stats["linked"], copied=link_stats["copied"]))
     log(msg("done", n=n_kits, out=out_root))
 
 
