@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Wavethings
 """Tests for Wavethings Kit Creator. Run with:  python3 -m unittest discover -s tests -v"""
-import json, os, random, re, subprocess, sys, tempfile, threading, unittest, urllib.request, wave
+import json, os, random, re, shutil, subprocess, sys, tempfile, threading, unittest, urllib.request, wave
 from unittest import mock
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -181,7 +181,7 @@ class Languages(unittest.TestCase):
     def test_engine_messages_match_between_languages(self):
         self.assertEqual(set(kc.MSG["en"]), set(kc.MSG["es"]))
         for k in kc.MSG["en"]:
-            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1)
+            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1, warp=1, tuned=1, long=1)
             if k != "h_name":
                 kc.MSG["en"][k].format(**kw)
                 kc.MSG["es"][k].format(**kw)
@@ -266,6 +266,40 @@ class Interface(unittest.TestCase):
             threading.Event().wait(0.1)
         self.assertIsNone(job["error"], job)
         self.assertTrue((tmp / "out" / "K 2" / "K 2.xpm").is_file())
+
+    def run_and_read_mutes(self, st):
+        self.assertTrue(self.api("/api/generate", st)["ok"])
+        for _ in range(100):
+            job = self.api("/api/job")
+            if job["done"]:
+                break
+            threading.Event().wait(0.1)
+        self.assertIsNone(job["error"], job)
+        out = next(Path(st["output"]).rglob("*.xpm")).read_text(encoding="utf-8")
+        return {i.get("number"): i.find("MuteGroup").text for i in ET.fromstring(out).find("Program/Instruments")}
+
+    def test_pad_choke_overrides_the_folder_choke_in_a_pack(self):
+        tmp = Path(tempfile.mkdtemp())
+        for n in ("Closed Hat 1.wav", "Open Hat 1.wav", "Kick 1.wav"):
+            make_wav(tmp / "pack" / n)
+        st = {"template": "", "output": str(tmp / "out"), "kits": 1, "name": "K", "seed": "1",
+              "recursive": True, "clear": True, "hardlink": False, "lang": "en",
+              "folders": [{"id": "p", "path": str(tmp / "pack"), "color": 1, "mute": 7, "pack": True}],
+              "padmap": {"1": [{"id": "p", "group": "Closed Hihat"}], "2": [{"id": "p", "group": "Open Hihat"}],
+                         "3": [{"id": "p", "group": "Kick"}], "4": [{"id": "p", "group": "Kick"}]},
+              "padChoke": {"1": 1, "2": 1, "3": 0, "99": 5, "x": 2, "5": 40}}
+        m = self.run_and_read_mutes(st)
+        # 1,2 = chosen 1; 3 = explicit "no choke" beats the folder's 7; 4 = no override: folder's 7
+        self.assertEqual((m["1"], m["2"], m["3"], m["4"]), ("1", "1", "0", "7"))
+        self.assertEqual(m["5"], "0")           # out-of-range / unassigned entries are ignored
+
+    def test_pad_choke_cleaning_and_presets(self):
+        self.assertEqual(gui.clean_pad_chokes({"1": 2, "2": "3", "3": 33, "-1": 1, "a": 1, "4": None, "05": 1}),
+                         {"1": 2, "2": 3})
+        self.assertEqual(gui.clean_pad_chokes("nope"), {})
+        r = gui.clean_preset({"folders": [], "padmap": {}, "padChoke": {"1": 4, "2": 99}})
+        self.assertEqual(r["padChoke"], {"1": 4})
+        self.assertEqual(gui.clean_preset({"folders": [], "padmap": {}})["padChoke"], {})    # older presets
 
     def test_generate_through_api_with_match_key(self):
         tmp = Path(tempfile.mkdtemp())
@@ -1235,6 +1269,107 @@ class StartFresh(unittest.TestCase):
             self.assertIn("A", gui.load_presets())
         finally:
             gui.PRESETS_FILE = old
+
+
+class LoopsWarpAndKey(unittest.TestCase):
+    """Long loops keep their real end, tempo in the name turns Warp on, samples go to the kit's key."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def layer(self, xpm, pad):
+        inst = [i for i in ET.fromstring(xpm).find("Program/Instruments") if i.get("number") == str(pad)][0]
+        return inst, inst.find("Layers")[0]
+
+    def make(self, rel, frames=200):
+        make_wav(self.tmp / rel, frames)
+        return self.tmp / rel
+
+    def gen(self, pads, **kw):
+        logs = []
+        kc.generate_kits(kc.default_template(), self.tmp / "out", 1, "K", pads, log=logs.append, seed=1, **kw)
+        return (self.tmp / "out" / "K" / "K.xpm").read_text(encoding="utf-8"), logs
+
+    def test_audio_frames_reads_wav_and_aiff_headers(self):
+        self.assertEqual(kc.audio_frames(self.make("a.wav", 1234)), 1234)
+        f = self.tmp / "b.aif"                              # 3 frames, 16-bit mono AIFF
+        comm = b"COMM" + (18).to_bytes(4, "big") + (1).to_bytes(2, "big") + (3).to_bytes(4, "big") + \
+               (16).to_bytes(2, "big") + b"\x40\x0e\xac\x44" + b"\x00" * 6
+        f.write_bytes(b"FORM" + (4 + len(comm)).to_bytes(4, "big") + b"AIFF" + comm)
+        self.assertEqual(kc.audio_frames(f), 3)
+        (self.tmp / "junk.wav").write_bytes(b"nope")
+        self.assertIsNone(kc.audio_frames(self.tmp / "junk.wav"))
+        self.assertIsNone(kc.audio_frames(self.tmp / "missing.wav"))
+
+    def test_audio_frames_handles_float_and_24_bit_wav(self):
+        for bits, fmt in ((24, 1), (32, 3)):
+            fmtc = (fmt).to_bytes(2, "little") + (2).to_bytes(2, "little") + (44100).to_bytes(4, "little") + \
+                   (44100 * 2 * bits // 8).to_bytes(4, "little") + (2 * bits // 8).to_bytes(2, "little") + bits.to_bytes(2, "little")
+            data = b"\0" * (100 * 2 * bits // 8)
+            body = b"WAVE" + b"fmt " + len(fmtc).to_bytes(4, "little") + fmtc + b"data" + len(data).to_bytes(4, "little") + data
+            f = self.tmp / f"x{bits}.wav"
+            f.write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
+            self.assertEqual(kc.audio_frames(f), 100)
+
+    def test_parse_bpm(self):
+        cases = {"Loop_128bpm.wav": 128, "BPM 140 - Pad.wav": 140, "Drums 174 BPM/x.wav": None, "122-Kick.wav": None,
+                 "Pad_90_Bpm_C.wav": 90, "Bass bpm128.wav": 128, "Loop 300bpm.wav": None, "Hat 40 bpm.wav": None}
+        for name, want in cases.items():
+            self.assertEqual(kc.parse_bpm(name), want, name)
+        # a tempo only on the folder counts for long samples, never for one-shots
+        self.assertEqual(kc.parse_bpm("Trance 140 BPM/Kicks/k.wav", frames=100), None)
+        self.assertEqual(kc.parse_bpm("Trance 140 BPM/Loops/l.wav", frames=400000), 140)
+
+    def test_key_shift(self):
+        self.assertEqual([kc.key_shift(a, "C") for a in ("C", "D", "A", "G", "F#", "Am", "Dm")], [0, -2, 3, 5, -6, 0, -5])
+        self.assertEqual(kc.key_shift("C", "G"), -5)
+
+    def test_long_loop_gets_its_real_end_and_short_ones_keep_the_default(self):
+        self.make("L/Long Loop.wav", 400000)
+        self.make("S/Short.wav", 5000)
+        xpm, logs = self.gen({1: [self.tmp / "L"], 2: [self.tmp / "S"]})
+        _, l1 = self.layer(xpm, 1)
+        _, l2 = self.layer(xpm, 2)
+        self.assertEqual((l1.find("SliceEnd").text, l1.find("SampleEnd").text), ("400000", "400000"))
+        self.assertEqual((l2.find("SliceEnd").text, l2.find("SampleEnd").text), ("300000", "0"))
+        self.assertTrue(any("long samples with full length: 1" in l for l in logs), logs)
+
+    def test_warp_is_on_for_a_bpm_in_the_name_and_can_be_disabled(self):
+        self.make("L/Synth Loop 128bpm.wav")
+        self.make("K/Kick 808.wav")
+        pads = {1: [self.tmp / "L"], 2: [self.tmp / "K"]}
+        xpm, _ = self.gen(pads)
+        i1, _ = self.layer(xpm, 1)
+        i2, _ = self.layer(xpm, 2)
+        self.assertEqual((i1.find("WarpEnable").text, i1.find("WarpTempo").text), ("True", "128.000000"))
+        self.assertEqual(i2.find("WarpEnable").text, "False")
+        self.assertEqual(i1.find("OneShot").text, "True")           # nothing else about the pad changed
+        shutil.rmtree(self.tmp / "out")
+        xpm, _ = self.gen(pads, warp_bpm=False)
+        self.assertEqual(self.layer(xpm, 1)[0].find("WarpEnable").text, "False")
+
+    def test_transposes_other_keys_to_the_kit_key_only_on_tonal_pads(self):
+        self.make("Bass/Bass_D.wav")            # D -> C = -2
+        for n in ("Kick A", "Kick B", "Snare 1", "Snare 2", "Hat 1"):    # names that merely look like a key
+            self.make(f"Drums/{n}.wav")
+        pads = {1: [self.tmp / "Bass"], 2: [self.tmp / "Drums"]}
+        xpm, logs = self.gen(pads, match_key="C", transpose_key=True)
+        self.assertEqual(self.layer(xpm, 1)[1].find("TuneCoarse").text, "-2")
+        self.assertTrue(any("transposed to the key: 1" in l for l in logs), logs)
+        shutil.rmtree(self.tmp / "out")
+        xpm, _ = self.gen(pads, match_key="C")          # off: the old behavior, no tuning
+        self.assertEqual(self.layer(xpm, 1)[1].find("TuneCoarse").text, "0")
+
+    def test_a_sample_already_in_the_key_is_preferred_and_not_tuned(self):
+        self.make("Bass/Bass_C.wav")
+        self.make("Bass/Bass_D.wav")
+        for seed_try in range(4):
+            out = self.tmp / f"o{seed_try}"
+            kc.generate_kits(kc.default_template(), out, 1, "K", {1: [self.tmp / "Bass"]}, log=lambda x: None,
+                             seed=seed_try, match_key="C", transpose_key=True)
+            xpm = (out / "K" / "K.xpm").read_text(encoding="utf-8")
+            self.assertEqual(self.layer(xpm, 1)[1].find("TuneCoarse").text, "0")
+            self.assertEqual(sample_names(xpm)["1"], "Bass_C")
 
 
 class GroupEditorApi(GroupColorApi):

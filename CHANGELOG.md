@@ -3,6 +3,35 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.12.0] - 2026-10-22
+
+### Fixed
+- **Long loops were cut off.** The templates mark every sample's end at 300000 frames (about 6.8 s at
+  44.1 kHz), so longer loops stopped early. A sample longer than that now gets its end set to its
+  real length (`SliceEnd`/`SampleEnd`), read from the .wav/.aif header (any WAV format). Shorter
+  samples keep the template values untouched.
+
+### Added
+- **Warp for samples with a tempo in the name** (on by default; checkbox "Warp samples with a tempo
+  (BPM) in their name"). "Loop_128bpm", "BPM 140 - Pad" or "Drums 174 BPM" switch Warp on for that pad
+  with that tempo, so it follows the project's tempo. A bare number ("122-Kick") is never taken for a
+  tempo (valid range 50-220), and a tempo that only the parent folder states counts only for long
+  samples, never one-shots. Command line: `--no-warp`, config `"warp_bpm": false`.
+- **Transpose to the kit's key** (with "Filter by key"): a sample in another key is no longer
+  skipped but pitched to the kit's key through its coarse tune, shortest way (-6..+5 semitones).
+  Samples already in the key are preferred, a minor key counts as its relative major (Am = C), and
+  only pads where the key filter applies are touched (never drums). Command line: `--transpose`,
+  config `"transpose_key": true`.
+
+## [1.11.0] - 2026-10-22
+
+### Added
+- **Choke per pad.** Each pad now has a small "C" badge (always on pads linked to a Pack folder) that
+  opens a picker: follow the folder's choke (as before), "No choke", or 1–32. Pads with the same
+  number cut each other off — e.g. Closed Hihat and Open Hihat pads taken from one sample pack. A
+  choke set on a pad wins over its folder's. It is saved in presets, copied with "Copy bank" and
+  forgotten when the pad is emptied.
+
 ## [1.10.2] - 2026-10-22
 
 ### Changed

@@ -20,7 +20,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.10.2"
+__version__ = "1.12.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -70,6 +70,85 @@ def index_by_key(files):
         if k:
             idx.setdefault(k, []).append(f)
     return idx
+
+
+def key_shift(sample_key, target_key):
+    """Semitones (-6..+5, the shortest way) that move a sample in `sample_key` to `target_key`.
+    A minor key counts as its relative major (Am = C, Dm = F), since they share the same notes,
+    so "Am" -> "C" is 0 and only the tonic of the scale matters."""
+    def tonic(k):
+        n = _KEY_SHARPS.index(k.rstrip("m"))
+        return (n + 3) % 12 if k.endswith("m") else n
+    d = (tonic(target_key) - tonic(sample_key)) % 12
+    return d - 12 if d > 5 else d
+
+
+def audio_frames(path):
+    """Number of sample frames of a .wav / .aif(f) file, read from its header (any WAV format,
+    including 24-bit, float and WAVE_FORMAT_EXTENSIBLE), or None when it can't be determined."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+            if len(head) < 12:
+                return None
+            kind = head[8:12]
+            if head[:4] in (b"RIFF", b"RF64") and kind == b"WAVE":
+                channels = bits = 0
+                while True:
+                    ch = fh.read(8)
+                    if len(ch) < 8:
+                        return None
+                    cid, size = ch[:4], int.from_bytes(ch[4:], "little")
+                    if cid == b"fmt ":
+                        fmt = fh.read(size + (size & 1))
+                        channels = int.from_bytes(fmt[2:4], "little")
+                        bits = int.from_bytes(fmt[14:16], "little")
+                    elif cid == b"data":
+                        if not channels or not bits:
+                            return None
+                        if size in (0, 0xFFFFFFFF):          # streamed/RF64 header: use the file size
+                            size = os.path.getsize(path) - fh.tell()
+                        return size // (channels * ((bits + 7) // 8))
+                    else:
+                        fh.seek(size + (size & 1), 1)
+            if head[:4] == b"FORM" and kind in (b"AIFF", b"AIFC"):
+                while True:
+                    ch = fh.read(8)
+                    if len(ch) < 8:
+                        return None
+                    cid, size = ch[:4], int.from_bytes(ch[4:], "big")
+                    if cid == b"COMM":
+                        return int.from_bytes(fh.read(size)[2:6], "big")
+                    fh.seek(size + (size & 1), 1)
+    except OSError:
+        return None
+    return None
+
+
+BPM_RE = re.compile(r"(?<![\d.])(\d{2,3})(?:\.\d+)?\s*[-_ ]?bpm(?![a-z])|(?<![a-z])bpm\s*[-_ ]?(\d{2,3})(?![\d])", re.I)
+BPM_MIN, BPM_MAX = 50, 220
+
+
+FOLDER_TEMPO_MIN_FRAMES = 66150     # ~1.5 s: a tempo on a parent folder only counts for long samples
+
+
+def parse_bpm(path, frames=None, levels=3):
+    """Tempo written in a sample's name ("Loop_128bpm", "BPM 140 - Pad", "Drums 174 BPM"), looking
+    at the file name first and then at the names of up to `levels` parent folders ("128 BPM/").
+    A bare number is never taken for a tempo (names like "122-Kick" are common). A tempo that only
+    the parent folder states ("Trance 140 BPM Pack/Kicks/") is used only when `frames` shows a
+    long sample (a loop), never for a one-shot. Returns a float, or None."""
+    p = Path(path)
+    names = [p.stem]
+    if frames and frames >= FOLDER_TEMPO_MIN_FRAMES:
+        names += [q.name for q in list(p.parents)[:levels]]
+    for name in names:
+        m = BPM_RE.search(name)
+        if m:
+            v = float(m.group(1) or m.group(2))
+            if BPM_MIN <= v <= BPM_MAX:
+                return v
+    return None
 
 
 # ---------------------------------------------------------------- pack / keyword mode
@@ -165,6 +244,9 @@ MSG = {
         "scan": "  {folder}: {n} samples",
         "empty": "  ! folder has no compatible samples (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads assigned",
+        "extras": "  Warp on: {warp} · transposed to the key: {tuned} · long samples with full length: {long}",
+        "h_nowarp": "do not turn Warp on for samples with a tempo (BPM) in their name",
+        "h_transpose": "with --match-key: pitch samples in another key to the kit's key instead of skipping them",
         "link_failed": "  ! Can't link samples ({why}). Hard links only work when the samples and the "
                        "output folder are on the SAME drive/volume and it supports them (not exFAT/FAT or "
                        "network shares). Copying those files instead.",
@@ -208,6 +290,9 @@ MSG = {
         "scan": "  {folder}: {n} samples",
         "empty": "  ! carpeta sin samples compatibles (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads asignados",
+        "extras": "  Warp activado: {warp} · transpuestos a la tonalidad: {tuned} · samples largos con su duración completa: {long}",
+        "h_nowarp": "no activar Warp en los samples con tempo (BPM) en el nombre",
+        "h_transpose": "con --match-key: subir/bajar de tono los samples de otra tonalidad a la del kit en vez de descartarlos",
         "link_failed": "  ! No se pueden enlazar los samples ({why}). Los enlaces solo funcionan si los samples y "
                        "la carpeta de salida están en el MISMO disco/volumen y este los admite (no exFAT/FAT "
                        "ni carpetas de red). Se copian esos archivos.",
@@ -513,7 +598,7 @@ def _pad_sources(entries):
 
 
 def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_folders=None,
-                 fallback=None, unmatched=None, match_cache=None):
+                 fallback=None, unmatched=None, match_cache=None, transpose=False, tonal_pads=None):
     """Pick one sample per pad. With several folders on a pad, a folder is chosen first
     (equal probability for each, regardless of how many samples it has) and then a sample.
     Avoids repeating a sample within the kit while free ones remain.
@@ -533,7 +618,13 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
     the samples matching that pad's keywords carry a detected key (a melodic pad, see KEYED_SHARE)
     are they limited to target_key, so the drum pads of a pack are never emptied or narrowed by
     it. If a pad can't be satisfied in target_key, another key is used (and its number is
-    appended to `fallback`) rather than leaving it empty."""
+    appended to `fallback`) rather than leaving it empty.
+
+    transpose=True (the caller will tune each sample to target_key, see key_shift) widens that
+    key-filtered pool from "samples in target_key" to "every sample with a detected key", while
+    still preferring those already in the key. `tonal_pads`, if a set, receives the pads where
+    the key filter applied: only those are meant to be transposed (a drum one-shot called
+    "Kick A" must never be pitched)."""
     key_filtering = bool(target_key and tonal_folders)
     if match_cache is None:
         match_cache = {}
@@ -553,12 +644,23 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
                     keyed = [f for f in pool if parse_key(f.name)]
                     if len(keyed) / len(pool) >= KEYED_SHARE:      # a melodic pad: apply the key
                         in_key = [f for f in keyed if parse_key(f.name) == target_key]
-                        if in_key:
+                        if tonal_pads is not None:
+                            tonal_pads.add(pad)
+                        if transpose:
+                            pool = keyed
+                        elif in_key:
                             pool = in_key
                         else:
                             relaxed = True                          # another key beats an empty pad
             elif key_filtering and x in tonal_folders:
-                pool = folder_keys[x].get(target_key, [])
+                keyed_all = [f for fs in folder_keys[x].values() for f in fs]
+                melodic = len(keyed_all) / len(cache[x]) >= KEYED_SHARE     # not just a stray "Kick A"
+                if transpose and melodic:
+                    pool = keyed_all
+                    if tonal_pads is not None:
+                        tonal_pads.add(pad)
+                else:
+                    pool = folder_keys[x].get(target_key, [])
             else:
                 pool = cache[x]
             pools[x] = pool
@@ -578,7 +680,13 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
         avail = [x for x in srcs if free[x]]
         if avail:
             src = rng.choice(avail)
-            f = rng.choice(free[src])
+            f = None
+            if transpose and target_key:        # a sample already in the key needs no pitch shift
+                near = [g for g in free[src] if parse_key(g.name) and key_shift(parse_key(g.name), target_key) == 0]
+                if near:
+                    f = rng.choice(near)
+            if f is None:
+                f = rng.choice(free[src])
         else:                       # everything used: allow repeats
             src = rng.choice(srcs)
             f = rng.choice(pools[src] or cache[src])
@@ -612,8 +720,21 @@ def unique_stems(chosen, pad_prefix=False):
 MUTE_RE = re.compile(r"<MuteGroup>\d*</MuteGroup>")
 
 
-def build_xpm(template, name, assignment, clear_others, mutegroups=None):
-    """Replaces only sample names, program name and (optionally) mute groups; the rest is untouched."""
+LAYER1_RE = re.compile(r'(<Layer number="1">)(.*?)(</Layer>)', re.S)
+LONG_SAMPLE = 300000        # the templates' default end marker (SliceEnd), in frames
+
+
+def _set_tag(text, tag, value, count=1):
+    return re.sub(rf"(<{tag}>)[^<]*(</{tag}>)", lambda m: f"{m.group(1)}{value}{m.group(2)}", text, count=count)
+
+
+def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=None):
+    """Replaces sample names, program name and (optionally) mute groups; the rest is untouched.
+    extras: {pad: {"frames": n, "bpm": x, "tune": semitones}} per assigned pad —
+      frames: real length of the sample; when longer than the template's default end marker
+        (300000 frames) the sample's end is moved to its real end, so long loops aren't cut;
+      bpm: tempo found in the name: turns Warp on for the pad, with that tempo;
+      tune: semitones added to the sample's coarse tune (to bring it to the kit's key)."""
     def fill_instrument(m):
         head, num, body, tail = m.groups()
         pad = int(num)
@@ -626,6 +747,21 @@ def build_xpm(template, name, assignment, clear_others, mutegroups=None):
             return lm.group(0)
 
         body = LAYER_RE.sub(fill_layer, body)
+        ex = (extras or {}).get(pad)
+        if ex and pad in assignment:
+            frames = ex.get("frames")
+            if frames and frames > LONG_SAMPLE:
+                def fix_end(lm):
+                    inner = _set_tag(_set_tag(lm.group(2), "SliceEnd", int(frames)), "SampleEnd", int(frames))
+                    return lm.group(1) + inner + lm.group(3)
+                body = LAYER1_RE.sub(fix_end, body, count=1)
+            if ex.get("tune"):
+                body = LAYER1_RE.sub(lambda lm: lm.group(1) + _set_tag(lm.group(2), "TuneCoarse", int(ex["tune"])) + lm.group(3),
+                                     body, count=1)
+            if ex.get("bpm"):
+                bpm = float(ex["bpm"])
+                body = _set_tag(body, "WarpTempo", f"{bpm:.6f}")
+                body = _set_tag(body, "WarpEnable", "True")
         if mutegroups is not None:   # mute group (1-32, 0 = none)
             g = mutegroups.get(pad, 0) if (pad in assignment or clear_others) else None
             if g is not None:
@@ -782,7 +918,8 @@ SqUqo1SsMkrlKqNUsDJKdbLTUWGqk50MC5NpYTIuTOaFycAwmRgmI8NUZlikQsOiTKbgqU52KjcsUsFh
 
 def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear_others=True,
                   recursive=True, hardlink=False, seed=None, log=print, mutegroups=None,
-                  match_key=None, pad_numbering=False, flat_output=False):
+                  match_key=None, pad_numbering=False, flat_output=False,
+                  warp_bpm=True, transpose_key=False):
     """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched).
 
     match_key: None/False disables key filtering. True or "random" picks a different key for
@@ -797,6 +934,13 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
     An entry of pads[pad] may be a (Path, keywords[, context]) tuple instead of a plain Path to
     restrict that one pad to the samples of that folder belonging to a keyword group; see
     pick_samples and _matching_files.
+    warp_bpm (default on): a sample whose name (or parent folder) states its tempo — "128bpm",
+    "BPM 140" — gets Warp enabled on its pad with that tempo, so it follows the project's tempo.
+    Samples longer than the templates' default end marker also get their end set to their real
+    length (otherwise long loops are cut off); that happens regardless of warp_bpm.
+    transpose_key: with match_key, a sample whose detected key differs from the kit's is not
+    skipped but pitched to the kit's key (coarse tune, see key_shift) — only on pads where the
+    key filter applies, and samples already in the key are preferred.
     flat_output: put every kit's .xpm and ALL samples directly in out_root instead of one
     subfolder per kit. The MPC's file browser can filter to show only kits, so a single folder
     is easier to browse. A sample already in the folder with the same name and identical content
@@ -891,8 +1035,10 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
             name = name_pat.format(n=n, key=target_key or "")
         fallback_pads = [] if (target_key or any_keywords) else None
         unmatched_pads = [] if any_keywords else None
+        tonal_pads = set()
         chosen = pick_samples(pads, cache, rng, target_key, folder_keys, tonal_folders,
-                              fallback_pads, unmatched_pads, match_cache)
+                              fallback_pads, unmatched_pads, match_cache,
+                              transpose=bool(transpose_key and target_key), tonal_pads=tonal_pads)
         stems = unique_stems(chosen, pad_numbering)
         if flat_output:
             kit_dir = out_root
@@ -909,7 +1055,26 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
                 place(f, kit_dir / (stem + f.suffix.lower()))
 
         assignment = {pad: stems[f] for pad, f in chosen.items()}
-        xpm = build_xpm(template, name, assignment, clear_others, mutegroups)
+        extras, tuned, warped, long_n = {}, 0, 0, 0
+        for pad, f in chosen.items():
+            ex = {}
+            frames = audio_frames(f)
+            if frames and frames > LONG_SAMPLE:
+                ex["frames"] = frames
+                long_n += 1
+            bpm = parse_bpm(f, frames) if warp_bpm else None
+            if bpm:
+                ex["bpm"] = bpm
+                warped += 1
+            k = parse_key(f.name)
+            if transpose_key and target_key and pad in tonal_pads and k:
+                shift = key_shift(k, target_key)
+                if shift:
+                    ex["tune"] = shift
+                    tuned += 1
+            if ex:
+                extras[pad] = ex
+        xpm = build_xpm(template, name, assignment, clear_others, mutegroups, extras)
         if colors is not None:
             xpm = set_pad_colors(xpm, colors, clear_others)
         (kit_dir / f"{name}.xpm").write_text(xpm, encoding="utf-8")
@@ -917,7 +1082,9 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
             log(msg("kit_key", name=name, n=len(assignment), key=target_key))
         else:
             log(msg("kit", name=name, n=len(assignment)))
-        if fallback_pads and target_key:
+        if warped or tuned or long_n:
+            log(msg("extras", warp=warped, tuned=tuned, long=long_n))
+        if fallback_pads and target_key and not transpose_key:
             log(msg("key_fallback", key=target_key,
                     pads=", ".join(str(p) for p in sorted(set(fallback_pads)))))
         if unmatched_pads:
@@ -955,6 +1122,8 @@ def main():
     ap.add_argument("--match-key", nargs="?", const="random", default=None, metavar="KEY", help=msg("h_key"))
     ap.add_argument("--pad-numbering", action="store_true", help=msg("h_padnum"))
     ap.add_argument("--flat", action="store_true", help=msg("h_flat"))
+    ap.add_argument("--no-warp", action="store_true", help=msg("h_nowarp"))
+    ap.add_argument("--transpose", action="store_true", help=msg("h_transpose"))
     ap.add_argument("--lang", choices=["en", "es"], help=msg("h_lang"))
     a = ap.parse_args()
 
@@ -978,6 +1147,8 @@ def main():
         match_key = normalized
     pad_numbering = a.pad_numbering or cfg.get("pad_numbering", False)
     flat_output = a.flat or cfg.get("flat_output", False)
+    warp_bpm = not a.no_warp and cfg.get("warp_bpm", True)
+    transpose_key = a.transpose or cfg.get("transpose_key", False)
 
     pads = {}
     for spec, folders in cfg.get("pads", {}).items():
@@ -1026,7 +1197,8 @@ def main():
         generate_kits(template, output, n_kits, name_pat, pads, clear_others=clear_others,
                       recursive=recursive, hardlink=hardlink, seed=seed,
                       mutegroups=mutegroups or None, match_key=match_key,
-                      pad_numbering=pad_numbering, flat_output=flat_output)
+                      pad_numbering=pad_numbering, flat_output=flat_output,
+                      warp_bpm=warp_bpm, transpose_key=transpose_key)
     except FileNotFoundError as e:
         sys.exit(str(e))
 

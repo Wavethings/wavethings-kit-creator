@@ -204,6 +204,21 @@ def clean_padmap_entry(e):
     return str(e)
 
 
+def clean_pad_chokes(d):
+    """{pad number (str): choke 0-32} from the page state / a preset; anything else is dropped.
+    0 means "no choke" (overriding the folder's own), a missing pad means "use the folder's"."""
+    out = {}
+    if isinstance(d, dict):
+        for k, v in d.items():
+            try:
+                n = int(v)
+                if str(int(k)) == str(k).strip() and int(k) >= 1 and 0 <= n <= 32:
+                    out[str(int(k))] = n
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def clean_preset(p):
     """Keeps only what a preset stores: folders (path, color, mute group, pack flag) and pad
     assignments (including each pad's keywords, in pack/keyword mode)."""
@@ -211,7 +226,7 @@ def clean_preset(p):
                 "mute": int(f.get("mute") or 0), "pack": bool(f.get("pack"))} for f in p["folders"]]
     padmap = {str(k): [clean_padmap_entry(e) for e in (v if isinstance(v, list) else [v])]
              for k, v in p["padmap"].items()}
-    return {"folders": folders, "padmap": padmap}
+    return {"folders": folders, "padmap": padmap, "padChoke": clean_pad_chokes(p.get("padChoke"))}
 
 
 def palette():
@@ -285,6 +300,7 @@ def run_job(st):
         groups = load_groups()
         group_colors = load_group_colors()
         pads, colors, mutes = {}, {}, {}
+        pad_chokes = clean_pad_chokes(st.get("padChoke"))
         ctx = tuple(tuple(v) for v in groups.values())     # all groups, so overlaps are resolved
         for pad, entries in st["padmap"].items():
             entries = entries if isinstance(entries, list) else [entries]
@@ -309,6 +325,9 @@ def run_job(st):
                 override = group_colors.get(used_groups[0]) if used_groups[0] else None
                 colors[int(pad)] = int(override if override else (used_folders[0].get("color") or 0))
                 mutes[int(pad)] = int(used_folders[0].get("mute") or 0)
+                pc = pad_chokes.get(str(pad))       # a choke set on the pad itself wins over its folder's
+                if pc is not None:
+                    mutes[int(pad)] = pc
         if not pads:
             raise ValueError(kc.msg("no_pads"))
         seed = int(st["seed"]) if str(st.get("seed", "")).strip() else None
@@ -317,7 +336,8 @@ def run_job(st):
                          colors=colors, clear_others=bool(st["clear"]), recursive=bool(st["recursive"]),
                          hardlink=bool(st["hardlink"]), seed=seed, log=log, mutegroups=mutes,
                          match_key=match_key, pad_numbering=bool(st.get("padNumbering")),
-                         flat_output=bool(st.get("flatOutput")))
+                         flat_output=bool(st.get("flatOutput")),
+                         warp_bpm=bool(st.get("warpBpm", True)), transpose_key=bool(st.get("transposeKey")))
     except Exception as e:  # show any error in the interface
         JOB["error"] = f"{type(e).__name__}: {e}"
     JOB["done"] = True
@@ -538,6 +558,7 @@ input[type=checkbox]{accent-color:var(--ac)}
  box-shadow:0 5px 0 #0008,0 10px 14px #0006,inset 0 1px 1px #fff6,inset 0 -14px 18px #0000004d;text-shadow:0 1px 2px #0008;transition:transform .06s,box-shadow .06s,filter .1s}
 .pad::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:radial-gradient(120% 80% at 30% 0%,#ffffff55,#fff0 55%),linear-gradient(#fff0 55%,#0003)}
 .pad>*{position:relative}
+.pad .padchokewrap{position:absolute}
 .pad .n{position:absolute;top:5px;left:8px;font-size:11px;opacity:.85}
 .pad:hover{filter:brightness(1.12)}
 .pad:active{transform:translateY(4px);box-shadow:0 1px 0 #0008,0 3px 6px #0006,inset 0 1px 1px #fff4,inset 0 -8px 12px #00000040}
@@ -565,6 +586,10 @@ pre{background:var(--pre);color:var(--pretx);border-radius:6px;padding:10px;max-
 .card select{width:auto;background:var(--inp);color:var(--inptx);border:1px solid var(--bbd);border-radius:6px;padding:3px 4px;font:inherit;font-size:12px}
 select.big,header select{background:var(--inp);color:var(--inptx);border:1px solid var(--bbd);border-radius:6px;padding:5px;font:inherit}
 html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color:#666;font-family:inherit}
+.chkgrid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:12px}.chkgrid button{padding:6px 0}.chkgrid button.wide{grid-column:span 8;text-align:left;padding:7px 10px}.chkgrid button.sel{background:var(--ac);color:var(--acink)}
+.padchokewrap{position:absolute;bottom:4px;right:5px}
+.padchoke{font-size:9px;font-weight:700;line-height:1;padding:2px 4px;border-radius:7px;background:#000b;color:#fff;border:1px solid #fff8;cursor:pointer;text-shadow:none;box-shadow:none}
+.padchoke:hover{background:#000}.padchoke.dim{opacity:.7}
 #kw>div{width:min(940px,96vw);max-height:92vh;display:flex;flex-direction:column;padding:18px}
 #kw h3{margin:0 0 4px;font-size:17px}
 #kwRows{overflow:auto;flex:1;min-height:120px;margin:10px 0;padding-right:4px}
@@ -601,10 +626,13 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
   <div class="row"><label data-i18n="lbl_seed"></label><input type="text" id="seed" data-ph="ph_seed"></div>
   <label class="chk"><input type="checkbox" id="recursive"><span data-i18n="chk_recursive"></span></label>
   <label class="chk"><input type="checkbox" id="clear"><span data-i18n="chk_clear"></span></label>
+  <label class="chk"><input type="checkbox" id="warpBpm"><span data-i18n="chk_warp"></span></label>
+  <div class="hint" data-i18n="hint_warp"></div>
   <label class="chk"><input type="checkbox" id="hardlink"><span data-i18n="chk_hardlink"></span></label>
   <label class="chk"><input type="checkbox" id="matchKeyOn"><span data-i18n="chk_matchkey"></span></label>
   <div class="row" id="matchKeyRow" style="display:none;margin:0 0 8px"><label data-i18n="lbl_matchkey"></label><select class="big" id="matchKeySel" style="flex:1"></select></div>
   <div class="hint" id="matchKeyHint" data-i18n="hint_matchkey"></div>
+  <label class="chk" id="transposeRow"><input type="checkbox" id="transposeKey"><span data-i18n="chk_transpose"></span></label>
   <label class="chk"><input type="checkbox" id="flatOutput"><span data-i18n="chk_flat"></span></label>
   <div class="hint" data-i18n="hint_flat"></div>
   <label class="chk"><input type="checkbox" id="padNumbering"><span data-i18n="chk_padnum"></span></label>
@@ -631,6 +659,10 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
  <div class="row"><button id="btnNocolor" onclick="setColor(0)"></button><button id="btnImport" onclick="importColors()" data-i18n="btn_import"></button></div>
  <div class="hint" id="palHint"></div>
 </div></div>
+<div id="chk" class="ovl" onclick="if(event.target===this)this.style.display='none'"><div style="width:min(380px,92vw)">
+ <b id="chkTitle"></b><div class="hint" data-i18n="hint_choke_pad"></div>
+ <div class="chkgrid" id="chkGrid"></div>
+</div></div>
 <div id="kw" class="ovl"><div>
  <h3 data-i18n="kw_title"></h3><div class="hint" style="margin:0" data-i18n="kw_sub"></div>
  <div class="kwbar" style="margin-top:8px"><span id="kwTestLbl" style="color:var(--mu)" data-i18n="kw_test"></span><select class="big" id="kwTest" style="min-width:200px;max-width:360px"></select><span class="sp"></span><button onclick="$('kwHelp').style.display=$('kwHelp').style.display==='none'?'block':'none'" data-i18n="kw_help_btn"></button></div>
@@ -652,7 +684,10 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  hint_folders:"1) Add folders (⌘-click to pick several, or a parent folder to add all its subfolders) · 2) select one · 3) click the pads on the right to assign it. The folder's color is applied to its pads on the MPC. “Choke” = mute group: pads of folders with the same number cut each other off (e.g. closed and open hi-hat).",
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
  lbl_folder:"Folder",btn_choose:"Choose…",lbl_kits:"No. of kits",lbl_name:"Name",lbl_seed:"Seed",ph_seed:"(optional) same seed = same kits",
- chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_hardlink:"Link samples instead of copying (same drive only)",
+ chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",chk_warp:"Warp samples with a tempo (BPM) in their name",
+ hint_warp:"A sample or loop whose name — or, for long samples, whose folder — says its tempo (“128bpm”, “BPM 140”, “Drums 174 BPM”) gets Warp switched on with that tempo, so it follows the project's tempo. Bare numbers like “122-Kick” are ignored. Samples longer than about 6.8 s also get their end set to their real end, so long loops are no longer cut.",
+ chk_transpose:"Transpose samples in other keys to the kit's key",
+ chk_hardlink:"Link samples instead of copying (same drive only)",
  chk_flat:"All kits and samples in one folder",
  hint_flat:"Instead of one folder per kit, every .xpm and all samples go straight into the output folder. Easier to browse on the MPC, whose file browser can filter to show only kits. A sample that is already there with identical content is shared by the kits; a different file with the same name gets a numeric suffix. Nothing existing is overwritten.",
  chk_padnum:"Number samples by pad (for Maschine and others)",
@@ -678,6 +713,8 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  kw_test:"Count samples in:",kw_test_none:"(no Pack folder)",kw_add:"＋ Add group",kw_reset:"Restore defaults",kw_openfile:"Open as text file",kw_save:"Save groups",
  kw_col_name:"Group",kw_col_words:"Keywords",kw_name_ph:"Group name",kw_words_ph:"kick, kik, bd, -loop",kw_del:"Delete group",
  kw_drag:"Drag to reorder (or Alt+↑/↓)",
+ choke_title:"Choke (mute group) of pad {0}",choke_chip:"Choke: {0}",choke_follow:"Follow the folder ({0})",choke_none:"No choke",choke_n:"Choke {0}",
+ hint_choke_pad:"Pads with the same choke number cut each other off (e.g. closed and open hi-hat). Set it here for a single pad — useful when several pads come from one Pack folder.",
  kw_reset_confirm:"Replace all your groups with the built-in defaults? Your current file is kept as keyword_groups.txt.bak.",
  kw_used_confirm:"{0} pad assignment(s) use groups you deleted or renamed to something unknown. They will go back to “whole pack”. Continue?",
  kw_saved:"{0} keyword group(s) saved",
@@ -700,7 +737,10 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  hint_folders:"1) Añade carpetas (⌘-clic para elegir varias, o una carpeta madre para añadir todas sus subcarpetas) · 2) selecciona una · 3) pulsa los pads de la derecha para asignársela. El color de la carpeta se aplica a sus pads en la MPC. “Choke” = grupo de choque: los pads de carpetas con el mismo número se cortan entre sí (p. ej. hi-hat cerrado y abierto).",
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
  lbl_folder:"Carpeta",btn_choose:"Elegir…",lbl_kits:"Nº de kits",lbl_name:"Nombre",lbl_seed:"Semilla",ph_seed:"(opcional) misma semilla = mismos kits",
- chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_hardlink:"Enlazar samples en vez de copiar (solo en el mismo disco)",
+ chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",chk_warp:"Warp en los samples con tempo (BPM) en el nombre",
+ hint_warp:"Un sample o loop cuyo nombre —o, si es largo, su carpeta— indica el tempo («128bpm», «BPM 140», «Drums 174 BPM») recibe Warp activado con ese tempo, así sigue el tempo del proyecto. Los números sueltos como «122-Kick» se ignoran. Los samples de más de unos 6,8 s también tienen su final en su final real, así los loops largos ya no se cortan.",
+ chk_transpose:"Transponer a la tonalidad del kit los samples de otras tonalidades",
+ chk_hardlink:"Enlazar samples en vez de copiar (solo en el mismo disco)",
  chk_flat:"Todos los kits y samples en una sola carpeta",
  hint_flat:"En lugar de una carpeta por kit, todos los .xpm y los samples van directamente a la carpeta de salida. Más cómodo en la MPC, cuyo navegador puede filtrar para mostrar solo kits. Un sample que ya esté allí con el mismo contenido se comparte entre kits; un archivo distinto con el mismo nombre recibe un sufijo numérico. No se sobrescribe nada existente.",
  chk_padnum:"Numerar samples por pad (para Maschine y otros)",
@@ -726,6 +766,8 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  kw_test:"Contar muestras en:",kw_test_none:"(sin carpeta Pack)",kw_add:"＋ Añadir grupo",kw_reset:"Restaurar valores",kw_openfile:"Abrir como archivo de texto",kw_save:"Guardar grupos",
  kw_col_name:"Grupo",kw_col_words:"Palabras clave",kw_name_ph:"Nombre del grupo",kw_words_ph:"kick, kik, bd, -loop",kw_del:"Borrar grupo",
  kw_drag:"Arrastra para reordenar (o Alt+↑/↓)",
+ choke_title:"Choke (grupo de silencio) del pad {0}",choke_chip:"Choke: {0}",choke_follow:"Seguir a la carpeta ({0})",choke_none:"Sin choke",choke_n:"Choke {0}",
+ hint_choke_pad:"Los pads con el mismo número de choke se cortan entre sí (p. ej. hi-hat cerrado y abierto). Ponlo aquí en un pad concreto — útil cuando varios pads salen de una misma carpeta Pack.",
  kw_reset_confirm:"¿Sustituir todos tus grupos por los predeterminados? Tu archivo actual se guarda como keyword_groups.txt.bak.",
  kw_used_confirm:"{0} asignación(es) de pads usan grupos que has borrado o renombrado a algo desconocido. Volverán a «todo el pack». ¿Continuar?",
  kw_saved:"{0} grupo(s) de palabras clave guardados",
@@ -747,7 +789,7 @@ function applyStatic(){
   for(const o of $("theme").options)o.textContent=t(`theme_${o.value}`);
   document.documentElement.lang=LANG}
 const colName=c=>{const m=/^Import(?:ed|ado) (\d+)$/.exec(c.name);return m?t("col.imported")+" "+m[1]:(I18N[LANG]["col."+c.name]||c.name)};
-const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",theme:"",preset:"",folders:[],padmap:{}};
+const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",theme:"",preset:"",folders:[],padmap:{},padChoke:{},warpBpm:true,transposeKey:false};
 let PAL=[],PRESETS={},GROUPS={},GROUPNAMES=[],GROUPCOLORS={},active=null,bank=0,palFor=null,palType="folder",MAC=true,saveT=null,copyTarget="all";
 const $=id=>document.getElementById(id), BANKS="ABCDEFGH";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -795,13 +837,13 @@ async function savePreset(){
   if(!S.folders.length){$("msg").textContent=t("preset_need_folders");return}
   const name=((await uiPrompt(t("preset_name"),S.preset||""))||"").trim().slice(0,60);if(!name)return;
   if(PRESETS[name]&&!(await uiConfirm(t("preset_overwrite",name))))return;
-  const preset={folders:S.folders.map(f=>({id:f.id,path:f.path,color:f.color||0,mute:f.mute||0})),padmap:S.padmap};
+  const preset={folders:S.folders.map(f=>({id:f.id,path:f.path,color:f.color||0,mute:f.mute||0})),padmap:S.padmap,padChoke:S.padChoke};
   const r=await api("/api/presets",{action:"save",name,preset});if(r.error)return;
   PRESETS=r.presets;S.preset=name;$("msg").textContent=t("preset_saved",name);render();save()}
 async function loadPreset(){
   const name=$("presetSel").value,p=PRESETS[name];if(!p)return;
   if(S.folders.length&&!(await uiConfirm(t("preset_load_confirm",name))))return;
-  S.folders=p.folders.map(f=>({...f,count:0}));S.padmap=JSON.parse(JSON.stringify(p.padmap));
+  S.folders=p.folders.map(f=>({...f,count:0}));S.padmap=JSON.parse(JSON.stringify(p.padmap));S.padChoke={...(p.padChoke||{})};
   active=S.folders.length?S.folders[0].id:null;S.preset=name;
   for(const f of S.folders)await scan(f);
   const missing=S.folders.filter(f=>f.count<0).length;
@@ -843,7 +885,8 @@ function setGroup(n,fid,group){
 function setMute(id,v){S.folders.find(f=>f.id===id).mute=+v;render();save()}
 function copyBank(){const src=[];for(let i=1;i<=16;i++)src.push(S.padmap[bank*16+i]);
   const ts=copyTarget==="all"?[0,1,2,3,4,5,6,7].filter(b=>b!==bank):[+copyTarget];
-  for(const b of ts)for(let i=1;i<=16;i++){const v=src[i-1],n=b*16+i;if(v)S.padmap[n]=[...v];else delete S.padmap[n]}
+  const srcC=[];for(let i=1;i<=16;i++)srcC.push(S.padChoke[bank*16+i]);
+  for(const b of ts)for(let i=1;i<=16;i++){const v=src[i-1],n=b*16+i;if(v)S.padmap[n]=[...v];else delete S.padmap[n];if(v&&srcC[i-1]!==undefined)S.padChoke[n]=srcC[i-1];else delete S.padChoke[n]}
   $("msg").textContent=t("copied",BANKS[bank],ts.map(b=>BANKS[b]).join(", "));render();save()}
 function clearBank(){for(let i=1;i<=16;i++)delete S.padmap[bank*16+i];render();save()}
 function openPal(id){palFor=id;palType="folder";const f=S.folders.find(x=>x.id===id);
@@ -945,9 +988,19 @@ async function kwReset(){
   if(!(await uiConfirm(t("kw_reset_confirm"))))return;
   const r=await api("/api/groups",{action:"reset"});if(r.error)return;
   applyGroups(r,{});KW=Object.entries(r.groups).map(([n,k])=>({id:++kwSeq,orig:n,name:n,kw:k.join(", ")}));kwRender();kwCounts();rescanAll()}
-addEventListener("keydown",e=>{if(e.key==="Escape"&&$("kw").style.display==="flex"&&$("dlg").style.display!=="flex")kwClose()});
+addEventListener("keydown",e=>{if(e.key==="Escape"&&$("chk").style.display==="flex")$("chk").style.display="none";if(e.key==="Escape"&&$("kw").style.display==="flex"&&$("dlg").style.display!=="flex")kwClose()});
 async function editGroupsFile(){const r=await api("/api/edit_groups",{});if(r.error)await uiAlert(r.error)}
+function folderChoke(n){const e=(S.padmap[n]||[])[0],f=e&&S.folders.find(x=>x.id===entryId(e));return f?(f.mute||0):0}
+const padChokeOf=n=>S.padChoke[n]!==undefined?S.padChoke[n]:folderChoke(n);
+function openChoke(n){const cur=S.padChoke[n];
+  $("chkTitle").textContent=t("choke_title",n);
+  $("chkGrid").innerHTML=`<button class="wide ${cur===undefined?"sel":""}" onclick="setPadChoke(${n},null)">${esc(t("choke_follow",folderChoke(n)||t("choke_none")))}</button><button class="wide ${cur===0?"sel":""}" onclick="setPadChoke(${n},0)">${esc(t("choke_none"))}</button>`+
+   Array.from({length:32},(_,i)=>`<button class="${cur===i+1?"sel":""}" title="${esc(t("choke_n",i+1))}" onclick="setPadChoke(${n},${i+1})">${i+1}</button>`).join("");
+  $("chk").style.display="flex"}
+function setPadChoke(n,v){if(v===null)delete S.padChoke[n];else S.padChoke[n]=v;$("chk").style.display="none";render();save()}
 function render(){
+  if(!S.padChoke||typeof S.padChoke!=="object")S.padChoke={};
+  for(const k in S.padChoke)if(!(S.padmap[k]||[]).length)delete S.padChoke[k];
   $("lang").value=LANG;$("btnClear").disabled=$("btnRescan").disabled=!S.folders.length;
   $("groupsInfo").textContent=t("groups_count",GROUPNAMES.length);
   const pn=Object.keys(PRESETS).sort((a,b)=>a.localeCompare(b));
@@ -974,13 +1027,15 @@ function render(){
    const dots=pairs.filter(({e,f})=>f.pack&&entryGroup(e)).map(({e,f})=>{const g=entryGroup(e);
      return `<span class="padcolor" style="background:${css(entryColor(e,f))}" onclick="event.stopPropagation();openPalGroup('${jsq(g)}')" title="${esc(t('group_color_title',g))}"></span>`}).join("");
    const lt=f&&(pairs.reduce((a,x)=>a+lumOf(entryColor(x.e,x.f)),0)/pairs.length)>.62;
-   h+=`<div class="pad${f?" on":""}${lt?" lt":""}" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span class="n">${n}</span>${body}${dots?`<div class="padtools">${dots}</div>`:""}</div>`}
+   const eff=f?padChokeOf(n):0,chip=f&&(pairs.some(x=>x.f.pack)||eff>0||S.padChoke[n]!==undefined)?`<button class="padchoke${S.padChoke[n]===undefined?" dim":""}" title="${esc(t("choke_title",n))}" onclick="event.stopPropagation();openChoke(${n})">C${eff||"–"}</button>`:"";
+   h+=`<div class="pad${f?" on":""}${lt?" lt":""}" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span class="n">${n}</span>${body}${dots?`<div class="padtools">${dots}</div>`:""}${chip?`<div class="padchokewrap">${chip}</div>`:""}</div>`}
   $("pads").innerHTML=h;
   const ct=[...Array(8).keys()].filter(b=>b!==bank);if(copyTarget!=="all"&&+copyTarget===bank)copyTarget="all";
   $("copyTo").innerHTML=`<option value="all">${t("opt_all")}</option>`+ct.map(b=>`<option value="${b}">${t("bank",BANKS[b])}</option>`).join("");$("copyTo").value=copyTarget;
   $("tpl").textContent=S.template||t("tpl_builtin");$("out").textContent=S.output||t("not_chosen");
   for(const k of["kits","name","seed"])if(document.activeElement!==$(k))$(k).value=S[k];
-  for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput"])$(k).checked=S[k];
+  for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput","warpBpm","transposeKey"])$(k).checked=S[k];
+  $("transposeRow").style.display=S.matchKey?"flex":"none";
   const ks=allKeys(),hasKeys=ks.length>0;
   $("matchKeyOn").checked=!!S.matchKey;$("matchKeyOn").disabled=!hasKeys&&!S.matchKey;
   $("matchKeyRow").style.display=S.matchKey?"flex":"none";
@@ -988,7 +1043,7 @@ function render(){
   if(S.matchKey)$("matchKeySel").value=ks.includes(S.matchKey)?S.matchKey:"random";
   $("matchKeyHint").textContent=hasKeys?t("hint_matchkey"):t("hint_matchkey_off")}
 for(const k of["kits","name","seed"])$(k).oninput=e=>{S[k]=e.target.value;save()};
-for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
+for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput","warpBpm","transposeKey"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
 $("matchKeyOn").onchange=e=>{S.matchKey=e.target.checked?"random":"";render();save()};
 $("matchKeySel").onchange=e=>{S.matchKey=e.target.value;save()};
 $("lang").onchange=e=>{LANG=S.lang=e.target.value;$("msg").textContent="";applyStatic();render();save()};
