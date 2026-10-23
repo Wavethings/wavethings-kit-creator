@@ -1321,7 +1321,9 @@ class LoopsWarpAndKey(unittest.TestCase):
         self.assertEqual(kc.parse_bpm("Trance 140 BPM/Loops/l.wav", frames=400000), 140)
 
     def test_key_shift(self):
-        self.assertEqual([kc.key_shift(a, "C") for a in ("C", "D", "A", "G", "F#", "Am", "Dm")], [0, -2, 3, 5, -6, 0, -5])
+        self.assertEqual([kc.key_shift(a, "C") for a in ("C", "D", "A", "G", "F#", "Am", "Dm")], [0, -2, 3, 5, -6, 3, -2])
+        self.assertEqual(kc.key_shift("Bm", "E"), 5)                  # the root in the name decides: B up to E
+        self.assertEqual(kc.key_shift("Bm", "Em"), 5)
         self.assertEqual(kc.key_shift("C", "G"), -5)
 
     def test_long_loop_gets_its_real_end_and_short_ones_keep_the_default(self):
@@ -1359,6 +1361,20 @@ class LoopsWarpAndKey(unittest.TestCase):
         xpm, _ = self.gen({1: [kw]})
         self.assertEqual(self.layer(xpm, 1)[0].find("WarpEnable").text, "True")
         self.assertEqual(self.layer(xpm, 1)[0].find("WarpTempo").text, "120.000000")
+
+    def test_pad_volume_lowers_assigned_pads_only(self):
+        self.make("K/Kick.wav")
+        xpm, _ = self.gen({1: [self.tmp / "K"]}, pad_volume_db=-6)
+        i1, l1 = self.layer(xpm, 1)
+        self.assertAlmostEqual(float(i1.find("Volume").text), 0.707946 * 10 ** (-6 / 20), places=5)   # -6 dB
+        self.assertEqual(l1.find("Volume").text, "1.000000")                    # the layer is not touched
+        self.assertEqual(self.layer(xpm, 2)[0].find("Volume").text, "0.707946")  # an empty pad neither
+        shutil.rmtree(self.tmp / "out")
+        xpm, _ = self.gen({1: [self.tmp / "K"]})                                 # default: unchanged
+        self.assertEqual(self.layer(xpm, 1)[0].find("Volume").text, "0.707946")
+
+    def test_gui_volume_is_clamped(self):
+        self.assertEqual([gui.clean_volume_db(v) for v in (-6, "-3", 0, 3, -30, None, "x")], [-6, -3, 0, 0, 0, 0, 0])
 
     def test_tempo_helpers(self):
         self.assertEqual(kc.estimate_tempo(44100 * 4, 44100), 120.0)          # 2 bars

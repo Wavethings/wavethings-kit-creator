@@ -3,6 +3,20 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.14.0] - 2026-10-23
+
+### Added
+- **Default pad volume** (Options > Samples): 0 dB (unchanged) down to -6 dB in 1 dB steps, applied to
+  every assigned pad on top of the pad's own volume (0 dB on an MPC pad is a Volume of 0.707946, so
+  -6 dB gives 0.354813). Samples straight from a pack are usually mastered hot. Command line:
+  `--volume -6` (0 to -24), config `"pad_volume_db"`. Empty pads and the layer's own volume are untouched.
+
+### Fixed
+- **Transposition now follows the key written in the file name.** A "Bm" sample taken to a kit in
+  E rose only 2 semitones (the old rule treated a minor key as its relative major: Bm = D, D to E = +2).
+  Now only the root note in the name counts, whatever the mode: B to E = **+5**; "Am" to C = +3; "D" to
+  C = -2 (always the shortest way, -6..+5). The sample's own embedded key information is ignored.
+
 ## [1.13.0] - 2026-10-22
 
 ### Changed

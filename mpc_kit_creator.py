@@ -20,7 +20,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -73,13 +73,11 @@ def index_by_key(files):
 
 
 def key_shift(sample_key, target_key):
-    """Semitones (-6..+5, the shortest way) that move a sample in `sample_key` to `target_key`.
-    A minor key counts as its relative major (Am = C, Dm = F), since they share the same notes,
-    so "Am" -> "C" is 0 and only the tonic of the scale matters."""
-    def tonic(k):
-        n = _KEY_SHARPS.index(k.rstrip("m"))
-        return (n + 3) % 12 if k.endswith("m") else n
-    d = (tonic(target_key) - tonic(sample_key)) % 12
+    """Semitones (-6..+5, the shortest way) that move a sample whose NAME says `sample_key` to
+    `target_key`. Only the root note counts, as written in the name: "Bm" -> "E" is +5 (B up to E),
+    "D" -> "C" is -2, whatever the mode (major/minor) of either. The sample's own embedded
+    key/pitch metadata, if any, is deliberately ignored."""
+    d = (_KEY_SHARPS.index(target_key.rstrip("m")) - _KEY_SHARPS.index(sample_key.rstrip("m"))) % 12
     return d - 12 if d > 5 else d
 
 
@@ -308,6 +306,8 @@ MSG = {
         "extras": "  Warp on (loops): {warp} · loops with no tempo found: {notempo} · transposed to the key: {tuned} · long samples with full length: {long}",
         "tuned_pads": "  Transposed to {key} (pad, semitones): {pads}",
         "h_nowarp": "do not turn Warp on for loops",
+        "h_volume": "lower every assigned pad's volume by this many dB (0 to -24, e.g. -6)",
+        "err_volume": "The pad volume must be between 0 and -24 dB",
         "h_transpose": "with --match-key: pitch samples in another key to the kit's key instead of skipping them",
         "link_failed": "  ! Can't link samples ({why}). Hard links only work when the samples and the "
                        "output folder are on the SAME drive/volume and it supports them (not exFAT/FAT or "
@@ -355,6 +355,8 @@ MSG = {
         "extras": "  Warp activado (loops): {warp} · loops sin tempo encontrado: {notempo} · transpuestos a la tonalidad: {tuned} · samples largos con su duración completa: {long}",
         "tuned_pads": "  Transpuestos a {key} (pad, semitonos): {pads}",
         "h_nowarp": "no activar Warp en los loops",
+        "h_volume": "bajar el volumen de cada pad asignado estos dB (de 0 a -24, p. ej. -6)",
+        "err_volume": "El volumen de los pads debe estar entre 0 y -24 dB",
         "h_transpose": "con --match-key: subir/bajar de tono los samples de otra tonalidad a la del kit en vez de descartarlos",
         "link_failed": "  ! No se pueden enlazar los samples ({why}). Los enlaces solo funcionan si los samples y "
                        "la carpeta de salida están en el MISMO disco/volumen y este los admite (no exFAT/FAT "
@@ -797,13 +799,18 @@ def _set_tag(text, tag, value, count=1):
     return re.sub(rf"(<{tag}>)[^<]*(</{tag}>)", lambda m: f"{m.group(1)}{value}{m.group(2)}", text, count=count)
 
 
-def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=None):
+PAD_UNITY = 0.707946        # an MPC pad's Volume at 0 dB (1.0 is +6 dB)
+
+
+def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=None, volume_db=0.0):
     """Replaces sample names, program name and (optionally) mute groups; the rest is untouched.
     extras: {pad: {"frames": n, "bpm": x, "tune": semitones}} per assigned pad —
       frames: real length of the sample; when longer than the template's default end marker
         (300000 frames) the sample's end is moved to its real end, so long loops aren't cut;
       bpm: tempo found in the name: turns Warp on for the pad, with that tempo;
-      tune: semitones added to the sample's coarse tune (to bring it to the kit's key)."""
+      tune: semitones added to the sample's coarse tune (to bring it to the kit's key).
+    volume_db: gain in dB (0 or negative) applied to every assigned pad, on top of whatever
+      volume the template's pad already has (0 dB on an MPC pad is a Volume of 0.707946)."""
     def fill_instrument(m):
         head, num, body, tail = m.groups()
         pad = int(num)
@@ -816,6 +823,10 @@ def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=
             return lm.group(0)
 
         body = LAYER_RE.sub(fill_layer, body)
+        if volume_db and pad in assignment:
+            cur = re.search(r"<Volume>([\d.]+)</Volume>", body)         # the pad's own, before its layers
+            if cur:
+                body = _set_tag(body, "Volume", f"{min(1.0, float(cur.group(1)) * 10 ** (volume_db / 20)):.6f}")
         ex = (extras or {}).get(pad)
         if ex and pad in assignment:
             frames = ex.get("frames")
@@ -988,7 +999,7 @@ SqUqo1SsMkrlKqNUsDJKdbLTUWGqk50MC5NpYTIuTOaFycAwmRgmI8NUZlikQsOiTKbgqU52KjcsUsFh
 def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear_others=True,
                   recursive=True, hardlink=False, seed=None, log=print, mutegroups=None,
                   match_key=None, pad_numbering=False, flat_output=False,
-                  warp_bpm=True, transpose_key=False):
+                  warp_bpm=True, transpose_key=False, pad_volume_db=0.0):
     """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched).
 
     match_key: None/False disables key filtering. True or "random" picks a different key for
@@ -1011,9 +1022,12 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
     Samples longer than the templates' default end marker also get their end set to their real
     length (otherwise long loops are cut off); that happens regardless of warp_bpm.
     transpose_key: with match_key, a sample whose detected key differs from the kit's is not
-    skipped but pitched to the kit's key (coarse tune, see key_shift) — only on pads where the
+    skipped but pitched to the kit's key (coarse tune, root note read from the file name, see
+    key_shift) — only on pads where the
     key filter applies. Samples are chosen at random among all keys (no preference for the one
     already in the key); the log lists each transposed pad.
+    pad_volume_db: 0 or negative (e.g. -6): lowers the volume of every assigned pad by that many dB,
+    since samples straight from a pack are usually mastered hot. 0 leaves the template's volume.
     flat_output: put every kit's .xpm and ALL samples directly in out_root instead of one
     subfolder per kit. The MPC's file browser can filter to show only kits, so a single folder
     is easier to browse. A sample already in the folder with the same name and identical content
@@ -1150,7 +1164,7 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
                     tuned.append(f"{pad} ({shift:+d})")
             if ex:
                 extras[pad] = ex
-        xpm = build_xpm(template, name, assignment, clear_others, mutegroups, extras)
+        xpm = build_xpm(template, name, assignment, clear_others, mutegroups, extras, pad_volume_db)
         if colors is not None:
             xpm = set_pad_colors(xpm, colors, clear_others)
         (kit_dir / f"{name}.xpm").write_text(xpm, encoding="utf-8")
@@ -1202,6 +1216,7 @@ def main():
     ap.add_argument("--flat", action="store_true", help=msg("h_flat"))
     ap.add_argument("--no-warp", action="store_true", help=msg("h_nowarp"))
     ap.add_argument("--transpose", action="store_true", help=msg("h_transpose"))
+    ap.add_argument("--volume", type=float, metavar="DB", help=msg("h_volume"))
     ap.add_argument("--lang", choices=["en", "es"], help=msg("h_lang"))
     a = ap.parse_args()
 
@@ -1227,6 +1242,13 @@ def main():
     flat_output = a.flat or cfg.get("flat_output", False)
     warp_bpm = not a.no_warp and cfg.get("warp_bpm", True)
     transpose_key = a.transpose or cfg.get("transpose_key", False)
+    pad_volume_db = a.volume if a.volume is not None else cfg.get("pad_volume_db", 0)
+    try:
+        pad_volume_db = float(pad_volume_db)
+    except (TypeError, ValueError):
+        pad_volume_db = 1.0
+    if not -24 <= pad_volume_db <= 0:
+        ap.error(msg("err_volume"))
 
     pads = {}
     for spec, folders in cfg.get("pads", {}).items():
@@ -1276,7 +1298,7 @@ def main():
                       recursive=recursive, hardlink=hardlink, seed=seed,
                       mutegroups=mutegroups or None, match_key=match_key,
                       pad_numbering=pad_numbering, flat_output=flat_output,
-                      warp_bpm=warp_bpm, transpose_key=transpose_key)
+                      warp_bpm=warp_bpm, transpose_key=transpose_key, pad_volume_db=pad_volume_db)
     except FileNotFoundError as e:
         sys.exit(str(e))
 
