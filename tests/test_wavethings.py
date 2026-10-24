@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Wavethings
 """Tests for Wavethings Kit Creator. Run with:  python3 -m unittest discover -s tests -v"""
-import json, os, random, re, shutil, subprocess, sys, tempfile, threading, unittest, urllib.request, wave
+import json, os, random, re, shutil, subprocess, sys, tempfile, threading, unittest, urllib.error, urllib.parse, urllib.request, wave
 from unittest import mock
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -181,7 +181,7 @@ class Languages(unittest.TestCase):
     def test_engine_messages_match_between_languages(self):
         self.assertEqual(set(kc.MSG["en"]), set(kc.MSG["es"]))
         for k in kc.MSG["en"]:
-            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1, warp=1, tuned=1, long=1, notempo=1)
+            kw = dict(folder="f", n=1, name="k", out="o", max=1, bad=[], tpl="t", cwd="c", key="C", pads="1, 2", pad=1, group="g", why="w", linked=1, copied=1, warp=1, tuned=1, long=1, notempo=1, lo=0.5, hi=1.5)
             if k != "h_name":
                 kc.MSG["en"][k].format(**kw)
                 kc.MSG["es"][k].format(**kw)
@@ -1239,11 +1239,20 @@ class StartFresh(unittest.TestCase):
     def tearDown(self):
         gui.STATE_FILE = self.old
 
-    def test_previous_session_is_forgotten_but_language_is_kept(self):
+    def test_previous_session_is_forgotten_but_settings_are_kept(self):
         gui.STATE_FILE.write_text(json.dumps({"lang": "es", "folders": [{"id": "a", "path": "/x"}],
-                                              "padmap": {"1": ["a"]}, "output": "/o"}))
+                                              "padmap": {"1": ["a"]}, "output": "/o", "seed": "7",
+                                              "locks": {"1": "/x/a.wav"}, "padChoke": {"1": 1},
+                                              "padVolume": -6, "warpBpm": False, "matchLevel": True}))
         gui.fresh_session()
-        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {"lang": "es"})
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()),
+                         {"lang": "es", "output": "/o", "padVolume": -6, "warpBpm": False, "matchLevel": True})
+
+    def test_bad_saved_settings_are_dropped(self):
+        gui.STATE_FILE.write_text(json.dumps({"lang": "xx", "theme": "neon", "padVolume": -99, "warpBpm": "yes",
+                                              "kits": True, "output": 5, "name": "Kit {n}", "recursive": False}))
+        gui.fresh_session()
+        self.assertEqual(json.loads(gui.STATE_FILE.read_text()), {"name": "Kit {n}", "recursive": False})
 
     def test_theme_is_kept_too_but_only_a_known_one(self):
         gui.STATE_FILE.write_text(json.dumps({"theme": "mpc", "padmap": {"1": ["a"]}}))
@@ -1413,6 +1422,224 @@ class LoopsWarpAndKey(unittest.TestCase):
         for name, tune in tunes:            # every sample lands on C
             self.assertEqual(int(tune), kc.key_shift(name.split("_")[1], "C"), name)
         self.assertGreater(len({n for n, _ in tunes}), 2)       # and not just the one already in C
+
+
+def make_amp_wav(path, amp, frames=8820, bits=16, fmt="wav"):
+    """A constant-amplitude square wave (amp 0-1) in 16/24-bit PCM, 32-bit float WAV or AIFF."""
+    import struct
+    path.parent.mkdir(parents=True, exist_ok=True)
+    vals = [amp if i % 2 else -amp for i in range(frames)]
+    if fmt == "float":
+        data = b"".join(struct.pack("<f", v) for v in vals)
+        tag, bps = 3, 32
+    elif fmt == "aiff":
+        data = b"".join(int(v * 32767).to_bytes(2, "big", signed=True) for v in vals)
+        comm = b"COMM" + (18).to_bytes(4, "big") + (1).to_bytes(2, "big") + frames.to_bytes(4, "big") + \
+               (16).to_bytes(2, "big") + b"\x40\x0e\xac\x44" + b"\x00" * 6
+        ssnd = b"SSND" + (8 + len(data)).to_bytes(4, "big") + b"\0" * 8 + data
+        path.write_bytes(b"FORM" + (4 + len(comm) + len(ssnd)).to_bytes(4, "big") + b"AIFF" + comm + ssnd)
+        return
+    else:
+        scale = (1 << (bits - 1)) - 1
+        data = b"".join(int(v * scale).to_bytes(bits // 8, "little", signed=True) for v in vals)
+        tag, bps = 1, bits
+    f = (tag).to_bytes(2, "little") + (1).to_bytes(2, "little") + (44100).to_bytes(4, "little") + \
+        (44100 * bps // 8).to_bytes(4, "little") + (bps // 8).to_bytes(2, "little") + bps.to_bytes(2, "little")
+    body = b"WAVE" + b"fmt " + len(f).to_bytes(4, "little") + f + b"data" + len(data).to_bytes(4, "little") + data
+    path.write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
+
+
+class LevelsLocksAndPreview(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        kc._level_cache.clear()
+
+    def test_loudness_is_measured_the_same_in_every_format(self):
+        make_amp_wav(self.tmp / "a16.wav", 0.5)
+        make_amp_wav(self.tmp / "a24.wav", 0.5, bits=24)
+        make_amp_wav(self.tmp / "af.wav", 0.5, fmt="float")
+        make_amp_wav(self.tmp / "a.aif", 0.5, fmt="aiff")
+        make_amp_wav(self.tmp / "half.wav", 0.25)
+        for n in ("a16.wav", "a24.wav", "af.wav", "a.aif"):
+            self.assertAlmostEqual(kc.loudness_db(self.tmp / n), -6.02, delta=0.1, msg=n)    # 0.5 amplitude
+        self.assertAlmostEqual(kc.loudness_db(self.tmp / "half.wav"), -12.04, delta=0.1)
+        self.assertIsNone(kc.loudness_db(self.tmp / "missing.wav"))
+        (self.tmp / "silent.wav").write_bytes(b"junk")
+        self.assertIsNone(kc.loudness_db(self.tmp / "silent.wav"))
+
+    def test_loudness_ignores_a_long_quiet_tail(self):
+        # a loud 0.1 s hit followed by 2 s of near silence still reads as loud
+        import struct
+        vals = [0.5 if i % 2 else -0.5 for i in range(4410)] + [0.001] * 88200
+        data = b"".join(int(v * 32767).to_bytes(2, "little", signed=True) for v in vals)
+        f = (1).to_bytes(2, "little") + (1).to_bytes(2, "little") + (44100).to_bytes(4, "little") + \
+            (88200).to_bytes(4, "little") + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+        body = b"WAVE" + b"fmt " + (16).to_bytes(4, "little") + f + b"data" + len(data).to_bytes(4, "little") + data
+        (self.tmp / "hit.wav").write_bytes(b"RIFF" + len(body).to_bytes(4, "little") + body)
+        self.assertGreater(kc.loudness_db(self.tmp / "hit.wav"), -8)
+
+    def test_level_gains_move_toward_the_median_and_are_limited(self):
+        g = kc.level_gains({1: -6.0, 2: -12.0, 3: -18.0, 4: None})
+        self.assertEqual(g, {1: -6.0, 2: 0.0, 3: 3.0})              # median -12; boost capped at +3
+        self.assertEqual(kc.level_gains({1: 0.0, 2: -40.0, 3: -40.0})[1], -9.0)    # cut capped at -9
+        self.assertEqual(kc.level_gains({1: -6.0}), {})
+
+    def gen(self, pads, **kw):
+        logs = []
+        kc.generate_kits(kc.default_template(), self.tmp / "out", 1, "K", pads, log=logs.append, seed=1, **kw)
+        return ET.fromstring((self.tmp / "out" / "K" / "K.xpm").read_text(encoding="utf-8")), logs
+
+    def vol(self, root, pad):
+        return float([i for i in root.find("Program/Instruments") if i.get("number") == str(pad)][0].find("Volume").text)
+
+    def test_match_level_evens_the_pads_out_and_stacks_with_the_default_volume(self):
+        make_amp_wav(self.tmp / "L/loud.wav", 0.5)
+        make_amp_wav(self.tmp / "M/mid.wav", 0.25)
+        make_amp_wav(self.tmp / "Q/quiet.wav", 0.125)
+        pads = {1: [self.tmp / "L"], 2: [self.tmp / "M"], 3: [self.tmp / "Q"]}
+        root, logs = self.gen(pads, match_level=True)
+        u = 0.707946
+        self.assertAlmostEqual(self.vol(root, 1), u * 10 ** (-6.02 / 20), places=2)       # loud: cut 6 dB
+        self.assertAlmostEqual(self.vol(root, 2), u, places=3)                          # median: untouched
+        self.assertAlmostEqual(self.vol(root, 3), min(1.0, u * 10 ** (3.0 / 20)), places=2)   # quiet: +3 dB
+        self.assertTrue(any("Levels evened out: 2 pad(s)" in l for l in logs), logs)
+        shutil.rmtree(self.tmp / "out")
+        root, _ = self.gen(pads, match_level=True, pad_volume_db=-6)
+        self.assertAlmostEqual(self.vol(root, 2), u * 10 ** (-6 / 20), places=3)
+        shutil.rmtree(self.tmp / "out")
+        root, _ = self.gen(pads)
+        self.assertEqual(self.vol(root, 1), 0.707946)                                    # off by default
+
+    def test_locked_pads_keep_their_sample_in_every_kit(self):
+        for i in range(6):
+            make_wav(self.tmp / "K" / f"k{i}.wav")
+            make_wav(self.tmp / "S" / f"s{i}.wav")
+        pads = {1: [self.tmp / "K"], 2: [self.tmp / "S"]}
+        lock = {1: self.tmp / "K" / "k3.wav", 2: self.tmp / "gone" / "x.wav"}      # the 2nd lock is stale
+        names = []
+        out = self.tmp / "o"
+        kc.generate_kits(kc.default_template(), out, 6, "K{n}", pads, log=lambda m: None, seed=5, locked=lock)
+        for n in range(1, 7):
+            xml = (out / f"K{n}" / f"K{n}.xpm").read_text(encoding="utf-8")
+            names.append(sample_names(xml))
+        self.assertTrue(all(n["1"] == "k3" for n in names))                      # pinned everywhere
+        self.assertGreater(len({n["2"] for n in names}), 1)                      # the stale lock is ignored
+
+    def test_pick_samples_fixed_and_exclude(self):
+        files = [self.tmp / f"f{i}.wav" for i in range(4)]
+        cache = {self.tmp: files}
+        pads = {1: [self.tmp], 2: [self.tmp]}
+        rng = random.Random(1)
+        got = kc.pick_samples(pads, cache, rng, fixed={1: files[2]})
+        self.assertEqual(got[1], files[2])
+        self.assertNotEqual(got[2], files[2])                                    # the pinned one isn't reused
+        got = kc.pick_samples({2: [self.tmp]}, cache, random.Random(3), exclude={files[0], files[1], files[2]})
+        self.assertEqual(got[2], files[3])
+
+    def test_prepare_sources_reports_keys_and_missing_folders(self):
+        make_wav(self.tmp / "B" / "Bass_C.wav")
+        src = kc.prepare_sources({1: [self.tmp / "B"]}, True, "random")
+        self.assertEqual(src["available_keys"], ["C"])
+        self.assertEqual(src["match_key"], "random")
+        self.assertIsNone(kc.prepare_sources({1: [self.tmp / "B"]}, True, None)["match_key"])
+        with self.assertRaises(FileNotFoundError):
+            kc.prepare_sources({1: [self.tmp / "nope"]}, True, None)
+
+
+class PreviewLayoutsApi(GroupColorApi):
+    """/api/preview (listen / re-roll / lock), /api/audio and /api/layouts, over real HTTP."""
+
+    def setUp(self):
+        super().setUp()
+        self.old = (gui.GROUPS_FILE, gui.LAYOUTS_FILE)
+        d = Path(tempfile.mkdtemp())
+        gui.GROUPS_FILE, gui.LAYOUTS_FILE = d / "keyword_groups.txt", d / "layouts.json"
+        gui.PREVIEW_OK.clear()
+        gui.MATCH_CACHE.clear()
+        self.pack = d / "pack"
+        for i in range(6):
+            make_wav(self.pack / "Kicks" / f"Kick {i}.wav")
+            make_wav(self.pack / "Snares" / f"Snare {i}.wav")
+        self.st = {"folders": [{"id": "p", "path": str(self.pack), "color": 1, "mute": 0, "pack": True}],
+                   "padmap": {"1": [{"id": "p", "group": "Kick"}], "2": [{"id": "p", "group": "Snare"}]},
+                   "recursive": True}
+
+    def tearDown(self):
+        gui.GROUPS_FILE, gui.LAYOUTS_FILE = self.old
+        super().tearDown()
+
+    def get(self, path, headers=None):
+        req = urllib.request.Request(self.base + path, headers=headers or {})
+        return urllib.request.urlopen(req)
+
+    def test_preview_picks_one_sample_per_pad_from_its_group(self):
+        r = self.api("/api/preview", self.st)
+        self.assertEqual(set(r["picks"]), {"1", "2"})
+        self.assertTrue(r["picks"]["1"]["name"].startswith("Kick"))
+        self.assertTrue(r["picks"]["2"]["name"].startswith("Snare"))
+        self.assertEqual(r["unmatched"], [])
+
+    def test_reroll_changes_only_the_asked_pad_and_locks_hold(self):
+        first = self.api("/api/preview", self.st)["picks"]
+        cur = {p: v["path"] for p, v in first.items()}
+        seen = set()
+        for _ in range(12):
+            r = self.api("/api/preview", dict(self.st, current=cur, only=[1]))["picks"]
+            self.assertEqual(r["2"]["path"], cur["2"])                          # untouched
+            seen.add(r["1"]["path"])
+        self.assertGreater(len(seen), 1)                                         # pad 1 does change
+        locked = dict(self.st, locks={"1": cur["1"]})
+        for _ in range(6):
+            self.assertEqual(self.api("/api/preview", locked)["picks"]["1"]["path"], cur["1"])
+
+    def test_preview_rejects_garbage_and_missing_folders(self):
+        self.assertEqual(self.api("/api/preview", {"nothing": 1}), {"error": "invalid"})
+        bad = dict(self.st, folders=[dict(self.st["folders"][0], path=str(self.pack / "gone"))])
+        self.assertIn("error", self.api("/api/preview", bad))
+
+    def test_audio_only_serves_previewed_files_with_ranges(self):
+        pick = self.api("/api/preview", self.st)["picks"]["1"]
+        url = f"/api/audio?t={self.token}&p={urllib.parse.quote(pick['path'])}"
+        full = self.get(url)
+        body = full.read()
+        self.assertEqual((full.status, full.headers["Accept-Ranges"], body[:4]), (200, "bytes", b"RIFF"))
+        part = self.get(url, {"Range": "bytes=0-9"})
+        self.assertEqual((part.status, part.read(), part.headers["Content-Range"]), (206, body[:10], f"bytes 0-9/{len(body)}"))
+        tail = self.get(url, {"Range": "bytes=-4"})
+        self.assertEqual(tail.read(), body[-4:])
+        for bad in (f"/api/audio?t={self.token}&p={urllib.parse.quote(str(self.pack / 'Kicks' / 'Kick 9.wav'))}",
+                    f"/api/audio?t={self.token}&p=/etc/passwd",
+                    f"/api/audio?t=wrong&p={urllib.parse.quote(pick['path'])}"):
+            with self.assertRaises(urllib.error.HTTPError):
+                self.get(bad)
+
+    def test_audio_converts_aiff_to_wav(self):
+        make_amp_wav(self.pack / "Kicks" / "Kick Z.aif", 0.5, fmt="aiff")
+        data = gui.aiff_to_wav(self.pack / "Kicks" / "Kick Z.aif")
+        self.assertEqual(data[:4] + data[8:12], b"RIFFWAVE")
+        (self.pack / "conv.wav").write_bytes(data)
+        self.assertEqual(kc.audio_frames(self.pack / "conv.wav"), 8820)
+        (self.pack / "x.aif").write_bytes(b"nope")
+        self.assertIsNone(gui.aiff_to_wav(self.pack / "x.aif"))
+
+    def test_builtin_layouts_are_in_the_state_and_use_real_groups(self):
+        lay = self.api("/api/state")["layouts"]
+        self.assertEqual(set(lay["builtin"]), {"drums", "drums_synth", "melodic", "loops"})
+        groups = gui.kc.load_keyword_groups(gui.kc.DEFAULT_KEYWORD_GROUPS_TEXT)
+        for key, tpl in lay["builtin"].items():
+            self.assertEqual(sorted(map(int, tpl["pads"])), list(range(1, 17)), key)
+            self.assertTrue(set(tpl["pads"].values()) <= set(groups), key)
+            self.assertEqual(set(tpl["names"]), {"en", "es"})
+
+    def test_save_and_delete_user_layouts(self):
+        body = {"action": "save", "name": "Mine", "pads": {"1": "Kick", "17": "Snare", "x": "Clap", "2": " "},
+                "choke": {"3": 2, "4": 40, "5": 0}}
+        r = self.api("/api/layouts", body)
+        self.assertEqual(r["layouts"]["user"], {"Mine": {"pads": {"1": "Kick"}, "choke": {"3": 2}}})
+        self.assertEqual(self.api("/api/state")["layouts"]["user"], r["layouts"]["user"])
+        self.assertEqual(self.api("/api/layouts", {"action": "save", "name": "", "pads": {"1": "Kick"}}), {"error": "invalid"})
+        self.assertEqual(self.api("/api/layouts", {"action": "save", "name": "Empty", "pads": {}}), {"error": "invalid"})
+        self.assertEqual(self.api("/api/layouts", {"action": "delete", "name": "Mine"})["layouts"]["user"], {})
 
 
 class GroupEditorApi(GroupColorApi):

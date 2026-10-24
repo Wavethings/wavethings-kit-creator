@@ -16,11 +16,12 @@ Pads: 1-16 = Bank A, 17-32 = Bank B ... up to 128 (same numbering as the MPC).
 A pad can take several folders (repeat --pad 1=...) and ranges are allowed (--pad 1-4=...).
 The interface language follows your system locale; force it with --lang en|es.
 """
+import functools
 import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -304,6 +305,7 @@ MSG = {
         "empty": "  ! folder has no compatible samples (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads assigned",
         "extras": "  Warp on (loops): {warp} · loops with no tempo found: {notempo} · transposed to the key: {tuned} · long samples with full length: {long}",
+        "levels": "  Levels evened out: {n} pad(s) corrected, from {lo:+.1f} to {hi:+.1f} dB",
         "tuned_pads": "  Transposed to {key} (pad, semitones): {pads}",
         "h_nowarp": "do not turn Warp on for loops",
         "h_volume": "lower every assigned pad's volume by this many dB (0 to -24, e.g. -6)",
@@ -353,6 +355,7 @@ MSG = {
         "empty": "  ! carpeta sin samples compatibles (.wav/.aif/.aiff)",
         "kit": "[{name}] {n} pads asignados",
         "extras": "  Warp activado (loops): {warp} · loops sin tempo encontrado: {notempo} · transpuestos a la tonalidad: {tuned} · samples largos con su duración completa: {long}",
+        "levels": "  Volúmenes igualados: {n} pad(s) corregidos, de {lo:+.1f} a {hi:+.1f} dB",
         "tuned_pads": "  Transpuestos a {key} (pad, semitonos): {pads}",
         "h_nowarp": "no activar Warp en los loops",
         "h_volume": "bajar el volumen de cada pad asignado estos dB (de 0 a -24, p. ej. -6)",
@@ -489,6 +492,18 @@ def scan_folder(folder, recursive=True):
     )
 
 
+class _Tokens(list):
+    """A token list that also keeps its set, so a one-word keyword is looked up in O(1)."""
+    def __init__(self, items):
+        super().__init__(items)
+        self.set = frozenset(items)
+
+
+@functools.lru_cache(maxsize=4096)
+def _keyword_tokens(keyword):
+    return tuple(_word_tokens(keyword))
+
+
 def _word_tokens(text):
     """Lowercase word tokens of a path, splitting on separators, camelCase and letter/digit
     boundaries: "Drums/HiHat_Closed01.wav" -> ["drums", "hi", "hat", "closed", "01", "wav"]."""
@@ -524,10 +539,12 @@ def _keyword_hit(keyword, text, tokens, min_substring):
         return False
     if len(keyword.replace(" ", "")) >= min_substring and keyword in text:
         return True
-    kt = _word_tokens(keyword)
+    kt = _keyword_tokens(keyword)
     n = len(kt)
     if not n:
         return False
+    if n == 1 and isinstance(tokens, _Tokens):
+        return kt[0] in tokens.set or kt[0] + "s" in tokens.set
     for i in range(len(tokens) - n + 1):
         if all(tokens[i + j] == kt[j] or tokens[i + j] == kt[j] + "s" for j in range(n)):
             return True
@@ -561,7 +578,7 @@ def _profile(rel_raw, specs):
     dirs_raw, name_raw = "/".join(p.parts[:-1]), p.stem
     full_raw = (dirs_raw + "/" + name_raw) if dirs_raw else name_raw
     dirs, name, full = dirs_raw.lower(), name_raw.lower(), full_raw.lower()
-    d_tok, n_tok, f_tok = _word_tokens(dirs_raw), _word_tokens(name_raw), _word_tokens(full_raw)
+    d_tok, n_tok, f_tok = (_Tokens(_word_tokens(x)) for x in (dirs_raw, name_raw, full_raw))
     out = []
     for pos, neg, req in specs:
         excluded = (any(_keyword_hit(k, full, f_tok, _DIR_MIN) for k in neg)
@@ -614,7 +631,13 @@ def _matching_files(folder, files, keywords, context=None, match_cache=None):
         return match_cache[key]
     specs, g = _specs(ctx), ctx.index(kw)
     subs = _subgroups(specs)
-    res = [f for f in files if _decide(_profile(_rel(folder, f), specs), g, subs)]
+    pkey = ("profiles", folder, ctx, len(files))      # every group of a pack shares one pass over its files
+    profiles = match_cache.get(pkey) if match_cache is not None else None
+    if profiles is None:
+        profiles = [_profile(_rel(folder, f), specs) for f in files]
+        if match_cache is not None:
+            match_cache[pkey] = profiles
+    res = [f for f, prof in zip(files, profiles) if _decide(prof, g, subs)]
     if match_cache is not None:
         match_cache[key] = res
     return res
@@ -673,7 +696,8 @@ def _is_loop_pad(entries):
 
 
 def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_folders=None,
-                 fallback=None, unmatched=None, match_cache=None, transpose=False, tonal_pads=None):
+                 fallback=None, unmatched=None, match_cache=None, transpose=False, tonal_pads=None,
+                 fixed=None, exclude=None):
     """Pick one sample per pad. With several folders on a pad, a folder is chosen first
     (equal probability for each, regardless of how many samples it has) and then a sample.
     Avoids repeating a sample within the kit while free ones remain.
@@ -699,11 +723,16 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
     key-filtered pool from "samples in target_key" to "every sample with a detected key" (chosen
     at random from all of them, so the kit isn't limited to one key and gets variety). `tonal_pads`, if a set, receives the pads where
     the key filter applied: only those are meant to be transposed (a drum one-shot called
-    "Kick A" must never be pitched)."""
+    "Kick A" must never be pitched).
+
+    fixed: {pad: file} pins a pad to one given sample (a "locked" pad); it is honored only if
+    that file still belongs to one of the pad's folders, otherwise the pad is picked normally.
+    exclude: files to treat as already used in the kit (so a re-rolled pad doesn't repeat them)."""
     key_filtering = bool(target_key and tonal_folders)
     if match_cache is None:
         match_cache = {}
-    used, chosen = set(), {}
+    fixed = fixed or {}
+    used, chosen = set(exclude or ()) | set(fixed.values()), {}
     for pad in sorted(pads):
         srcs, kw_for, ctx_for = _pad_sources(pads[pad])
         srcs = [x for x in srcs if cache[x]]
@@ -751,6 +780,11 @@ def pick_samples(pads, cache, rng, target_key=None, folder_keys=None, tonal_fold
         elif relaxed and fallback is not None:
             fallback.append(pad)
 
+        pin = fixed.get(pad)
+        if pin is not None and any(pin in cache[x] for x in srcs):
+            used.add(pin)
+            chosen[pad] = pin
+            continue
         free = {x: [f for f in pools[x] if f not in used] for x in srcs}
         avail = [x for x in srcs if free[x]]
         if avail:
@@ -799,6 +833,136 @@ def _set_tag(text, tag, value, count=1):
     return re.sub(rf"(<{tag}>)[^<]*(</{tag}>)", lambda m: f"{m.group(1)}{value}{m.group(2)}", text, count=count)
 
 
+def read_mono_floats(path, seconds=4.0, max_samples=60000):
+    """First `seconds` of a .wav / .aif(f) as a list of floats (-1..1, first channel only) at a
+    reduced rate, plus that rate: (samples, rate) or (None, None) when the format isn't PCM/float
+    or can't be read. Pure Python on purpose (no numpy): good enough to compare loudness."""
+    import struct
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+            kind = head[8:12]
+            chans = bits = rate = fmt_tag = 0
+            big = False
+            audio = None
+            if head[:4] in (b"RIFF", b"RF64") and kind == b"WAVE":
+                while True:
+                    ch = fh.read(8)
+                    if len(ch) < 8:
+                        return None, None
+                    cid, size = ch[:4], int.from_bytes(ch[4:], "little")
+                    if cid == b"fmt ":
+                        f = fh.read(size + (size & 1))
+                        fmt_tag = int.from_bytes(f[0:2], "little")
+                        chans = int.from_bytes(f[2:4], "little")
+                        rate = int.from_bytes(f[4:8], "little")
+                        bits = int.from_bytes(f[14:16], "little")
+                        if fmt_tag == 0xFFFE and len(f) >= 26:       # extensible: real tag in the GUID
+                            fmt_tag = int.from_bytes(f[24:26], "little")
+                    elif cid == b"data":
+                        if not (chans and bits and rate):
+                            return None, None
+                        if size in (0, 0xFFFFFFFF):
+                            size = os.path.getsize(path) - fh.tell()
+                        want = int(seconds * rate) * chans * (bits // 8)
+                        audio = fh.read(min(size, want))
+                        break
+                    else:
+                        fh.seek(size + (size & 1), 1)
+            elif head[:4] == b"FORM" and kind in (b"AIFF", b"AIFC"):
+                big, fmt_tag = True, 1
+                while True:
+                    ch = fh.read(8)
+                    if len(ch) < 8:
+                        return None, None
+                    cid, size = ch[:4], int.from_bytes(ch[4:], "big")
+                    if cid == b"COMM":
+                        c = fh.read(size + (size & 1))
+                        chans = int.from_bytes(c[0:2], "big")
+                        bits = int.from_bytes(c[6:8], "big")
+                        exp = int.from_bytes(c[8:10], "big") & 0x7FFF
+                        rate = int(int.from_bytes(c[10:18], "big") * 2 ** (exp - 16383 - 63))
+                        if kind == b"AIFC" and c[18:22] not in (b"NONE", b"twos"):
+                            return None, None                  # compressed AIFF-C
+                    elif cid == b"SSND":
+                        if not (chans and bits and rate):
+                            return None, None
+                        fh.read(8)
+                        want = int(seconds * rate) * chans * ((bits + 7) // 8)
+                        audio = fh.read(min(size - 8, want))
+                        break
+                    else:
+                        fh.seek(size + (size & 1), 1)
+            else:
+                return None, None
+        width = (bits + 7) // 8
+        frame = chans * width
+        n = len(audio) // frame
+        if not n:
+            return None, None
+        stride = max(1, n // max_samples)
+        out = []
+        if fmt_tag == 3 and bits in (32, 64):
+            code = ("<" if not big else ">") + ("f" if bits == 32 else "d")
+            sz = bits // 8
+            for i in range(0, n, stride):
+                out.append(struct.unpack_from(code, audio, i * frame)[0])
+        elif fmt_tag == 1 and bits in (8, 16, 24, 32):
+            order = "big" if big else "little"
+            scale = float(1 << (bits - 1))
+            for i in range(0, n, stride):
+                chunk = audio[i * frame:i * frame + width]
+                if bits == 8:
+                    out.append((chunk[0] - 128) / 128.0 if not big else int.from_bytes(chunk, "big", signed=True) / 128.0)
+                else:
+                    out.append(int.from_bytes(chunk, order, signed=True) / scale)
+        else:
+            return None, None
+        return out, rate / stride
+    except (OSError, ValueError, struct.error, OverflowError):
+        return None, None
+
+
+LEVEL_WINDOW = 0.1         # seconds: loudness is that of the loudest 100 ms
+_level_cache = {}
+
+
+def loudness_db(path):
+    """Loudness of a sample in dB (RMS of its loudest 100 ms, 0 dB = full scale), or None when
+    the file can't be read. A hit is judged by how it sounds at its loudest, not by its tail."""
+    key = str(path)
+    if key in _level_cache:
+        return _level_cache[key]
+    xs, rate = read_mono_floats(path)
+    db = None
+    if xs:
+        win = max(1, int(LEVEL_WINDOW * rate))
+        best = 0.0
+        for i in range(0, max(1, len(xs) - win + 1), max(1, win // 2)):
+            block = xs[i:i + win]
+            e = sum(v * v for v in block) / len(block)
+            if e > best:
+                best = e
+        if best > 0:
+            import math
+            db = 10 * math.log10(best)
+    _level_cache[key] = db
+    return db
+
+
+LEVEL_MAX_CUT, LEVEL_MAX_BOOST = -9.0, 3.0      # per-pad correction limits, in dB
+
+
+def level_gains(levels):
+    """{pad: dB correction} bringing each pad's loudness to the kit's median, limited to
+    -9..+3 dB (a pad's volume can only go so far above its default). `levels` is {pad: dB}."""
+    vals = sorted(v for v in levels.values() if v is not None)
+    if len(vals) < 2:
+        return {}
+    mid = vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals) // 2 - 1] + vals[len(vals) // 2]) / 2
+    return {pad: max(LEVEL_MAX_CUT, min(LEVEL_MAX_BOOST, mid - v)) for pad, v in levels.items() if v is not None}
+
+
 PAD_UNITY = 0.707946        # an MPC pad's Volume at 0 dB (1.0 is +6 dB)
 
 
@@ -808,7 +972,8 @@ def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=
       frames: real length of the sample; when longer than the template's default end marker
         (300000 frames) the sample's end is moved to its real end, so long loops aren't cut;
       bpm: tempo found in the name: turns Warp on for the pad, with that tempo;
-      tune: semitones added to the sample's coarse tune (to bring it to the kit's key).
+      tune: semitones added to the sample's coarse tune (to bring it to the kit's key);
+      gain: extra dB on the pad's volume (level matching), added to volume_db.
     volume_db: gain in dB (0 or negative) applied to every assigned pad, on top of whatever
       volume the template's pad already has (0 dB on an MPC pad is a Volume of 0.707946)."""
     def fill_instrument(m):
@@ -823,11 +988,12 @@ def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=
             return lm.group(0)
 
         body = LAYER_RE.sub(fill_layer, body)
-        if volume_db and pad in assignment:
+        ex = (extras or {}).get(pad)
+        total_db = (volume_db or 0.0) + ((ex or {}).get("gain") or 0.0)
+        if total_db and pad in assignment:
             cur = re.search(r"<Volume>([\d.]+)</Volume>", body)         # the pad's own, before its layers
             if cur:
-                body = _set_tag(body, "Volume", f"{min(1.0, float(cur.group(1)) * 10 ** (volume_db / 20)):.6f}")
-        ex = (extras or {}).get(pad)
+                body = _set_tag(body, "Volume", f"{min(1.0, float(cur.group(1)) * 10 ** (total_db / 20)):.6f}")
         if ex and pad in assignment:
             frames = ex.get("frames")
             if frames and frames > LONG_SAMPLE:
@@ -996,43 +1162,11 @@ SqUqo1SsMkrlKqNUsDJKdbLTUWGqk50MC5NpYTIuTOaFycAwmRgmI8NUZlikQsOiTKbgqU52KjcsUsFh
 """
 
 
-def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear_others=True,
-                  recursive=True, hardlink=False, seed=None, log=print, mutegroups=None,
-                  match_key=None, pad_numbering=False, flat_output=False,
-                  warp_bpm=True, transpose_key=False, pad_volume_db=0.0):
-    """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched).
-
-    match_key: None/False disables key filtering. True or "random" picks a different key for
-    each kit, at random among the keys detected in the assigned folders. A specific key (e.g.
-    "C#m", typically from normalize_key_input) fixes that key for every kit. Only folders with
-    at least one sample whose file name carries a detected key are restricted by the filter;
-    others (e.g. drums) are unaffected. name_pat may use "{key}" to include the kit's key.
-    pad_numbering: prefixes every output sample name with its pad number (see unique_stems) so
-    the kit folder also works with samplers that have no .xpm support of their own and just
-    import a selection of files in alphabetical order (Maschine, Battery, several hardware
-    samplers) — drag a bank's 16 files together onto the sampler's first pad.
-    An entry of pads[pad] may be a (Path, keywords[, context]) tuple instead of a plain Path to
-    restrict that one pad to the samples of that folder belonging to a keyword group; see
-    pick_samples and _matching_files.
-    warp_bpm (default on): every LOOP gets Warp enabled on its pad, so it follows the project's
-    tempo. A sample is a loop when its name or a parent folder says "loop", or when the pad is
-    assigned a keyword group that asks for loops (see _is_loop_pad). Its tempo is the one in the
-    name ("128bpm"), a bare number in the name ("DPT_A#_138_Bass_Loop") that agrees with the loop's
-    length, or else estimated from its length (see loop_tempo).
-    Samples longer than the templates' default end marker also get their end set to their real
-    length (otherwise long loops are cut off); that happens regardless of warp_bpm.
-    transpose_key: with match_key, a sample whose detected key differs from the kit's is not
-    skipped but pitched to the kit's key (coarse tune, root note read from the file name, see
-    key_shift) — only on pads where the
-    key filter applies. Samples are chosen at random among all keys (no preference for the one
-    already in the key); the log lists each transposed pad.
-    pad_volume_db: 0 or negative (e.g. -6): lowers the volume of every assigned pad by that many dB,
-    since samples straight from a pack are usually mastered hot. 0 leaves the template's volume.
-    flat_output: put every kit's .xpm and ALL samples directly in out_root instead of one
-    subfolder per kit. The MPC's file browser can filter to show only kits, so a single folder
-    is easier to browse. A sample already in the folder with the same name and identical content
-    is shared between kits; a different file with the same name gets a numeric suffix
-    ("Kick_2"), so nothing existing is ever overwritten."""
+def prepare_sources(pads, recursive, match_key, log=lambda m: None):
+    """Scans every folder the pads use and, with a key filter, indexes the detected keys.
+    Returns {"cache": {folder: [files]}, "any_keywords", "folder_keys", "tonal_folders",
+    "available_keys", "match_key"} (match_key becomes None when no sample has a detectable key).
+    Shared by generate_kits and the GUI's pad preview."""
     all_folders, any_keywords, keyword_folders = set(), False, set()
     for entries in pads.values():
         srcs, kw_for, _ = _pad_sources(entries)
@@ -1065,6 +1199,55 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
         if not available_keys:
             log(msg("key_none"))
             match_key = None
+    return {"cache": cache, "any_keywords": any_keywords, "folder_keys": folder_keys,
+            "tonal_folders": tonal_folders, "available_keys": available_keys, "match_key": match_key}
+
+
+def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear_others=True,
+                  recursive=True, hardlink=False, seed=None, log=print, mutegroups=None,
+                  match_key=None, pad_numbering=False, flat_output=False,
+                  warp_bpm=True, transpose_key=False, pad_volume_db=0.0,
+                  match_level=False, locked=None):
+    """pads: {pad: [folder Path, ...]}; colors: {pad: int} or None (leave colors untouched).
+
+    match_key: None/False disables key filtering. True or "random" picks a different key for
+    each kit, at random among the keys detected in the assigned folders. A specific key (e.g.
+    "C#m", typically from normalize_key_input) fixes that key for every kit. Only folders with
+    at least one sample whose file name carries a detected key are restricted by the filter;
+    others (e.g. drums) are unaffected. name_pat may use "{key}" to include the kit's key.
+    pad_numbering: prefixes every output sample name with its pad number (see unique_stems) so
+    the kit folder also works with samplers that have no .xpm support of their own and just
+    import a selection of files in alphabetical order (Maschine, Battery, several hardware
+    samplers) — drag a bank's 16 files together onto the sampler's first pad.
+    An entry of pads[pad] may be a (Path, keywords[, context]) tuple instead of a plain Path to
+    restrict that one pad to the samples of that folder belonging to a keyword group; see
+    pick_samples and _matching_files.
+    warp_bpm (default on): every LOOP gets Warp enabled on its pad, so it follows the project's
+    tempo. A sample is a loop when its name or a parent folder says "loop", or when the pad is
+    assigned a keyword group that asks for loops (see _is_loop_pad). Its tempo is the one in the
+    name ("128bpm"), a bare number in the name ("DPT_A#_138_Bass_Loop") that agrees with the loop's
+    length, or else estimated from its length (see loop_tempo).
+    Samples longer than the templates' default end marker also get their end set to their real
+    length (otherwise long loops are cut off); that happens regardless of warp_bpm.
+    transpose_key: with match_key, a sample whose detected key differs from the kit's is not
+    skipped but pitched to the kit's key (coarse tune, root note read from the file name, see
+    key_shift) — only on pads where the
+    key filter applies. Samples are chosen at random among all keys (no preference for the one
+    already in the key); the log lists each transposed pad.
+    pad_volume_db: 0 or negative (e.g. -6): lowers the volume of every assigned pad by that many dB,
+    since samples straight from a pack are usually mastered hot. 0 leaves the template's volume.
+    match_level: evens out the kit's loudness: each pad's volume is corrected (-9..+3 dB) toward the
+    median loudness of the kit's samples (see loudness_db / level_gains), on top of pad_volume_db.
+    locked: {pad: Path} pins pads to one sample in every kit (a "locked" pad); the rest are random.
+    flat_output: put every kit's .xpm and ALL samples directly in out_root instead of one
+    subfolder per kit. The MPC's file browser can filter to show only kits, so a single folder
+    is easier to browse. A sample already in the folder with the same name and identical content
+    is shared between kits; a different file with the same name gets a numeric suffix
+    ("Kick_2"), so nothing existing is ever overwritten."""
+    src = prepare_sources(pads, recursive, match_key, log)
+    cache, any_keywords = src["cache"], src["any_keywords"]
+    folder_keys, tonal_folders = src["folder_keys"], src["tonal_folders"]
+    available_keys, match_key = src["available_keys"], src["match_key"]
 
     rng = random.Random(seed)
     out_root = Path(out_root).expanduser()
@@ -1125,7 +1308,8 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
         tonal_pads = set()
         chosen = pick_samples(pads, cache, rng, target_key, folder_keys, tonal_folders,
                               fallback_pads, unmatched_pads, match_cache,
-                              transpose=bool(transpose_key and target_key), tonal_pads=tonal_pads)
+                              transpose=bool(transpose_key and target_key), tonal_pads=tonal_pads,
+                              fixed=locked)
         stems = unique_stems(chosen, pad_numbering)
         if flat_output:
             kit_dir = out_root
@@ -1164,6 +1348,14 @@ def generate_kits(template, out_root, n_kits, name_pat, pads, colors=None, clear
                     tuned.append(f"{pad} ({shift:+d})")
             if ex:
                 extras[pad] = ex
+        if match_level:
+            gains = level_gains({pad: loudness_db(f) for pad, f in chosen.items()})
+            for pad, g in gains.items():
+                if abs(g) >= 0.05:
+                    extras.setdefault(pad, {})["gain"] = round(g, 2)
+            if gains:
+                log(msg("levels", n=sum(1 for g in gains.values() if abs(g) >= 0.05),
+                        lo=min(gains.values()), hi=max(gains.values())))
         xpm = build_xpm(template, name, assignment, clear_others, mutegroups, extras, pad_volume_db)
         if colors is not None:
             xpm = set_pad_colors(xpm, colors, clear_others)

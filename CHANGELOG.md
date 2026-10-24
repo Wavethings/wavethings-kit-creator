@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] - 2026-10-24
+
+### Added
+- **Preview kit: listen, re-roll, lock.** "🎲 Preview kit" picks a sample for every assigned pad, as a
+  generated kit would, and shows its name on the pad. Each pad gets ▶ (listen — a transposed sample
+  plays already pitched; AIFF files are converted on the fly), 🎲 (pick another sample for that pad
+  only) and 🔒/🔓. A **locked** pad keeps that exact sample in every kit you generate while the others
+  stay random, so you can search for combinations around a few sounds; "Lock all" + 1 kit exports
+  exactly the kit you heard. Changing a pad's assignment drops its preview and lock.
+- **Pad layout templates.** A layout puts a keyword group on each of the 16 pads of a bank, with the
+  hi-hat chokes, for the selected Pack folder — switch to another pack and apply it again instead of
+  starting over. Built in: Drum kit, Drums + synths, Melodic palette and Loops; "Save bank…" stores your
+  own (group names and chokes, independent of any folder).
+- **Even out pad volumes** (Options > Samples): measures each sample's loudest 100 ms and corrects
+  the pad volumes toward the kit's median, within -9 dB / +3 dB, on top of the default pad volume.
+- **Your settings are remembered.** Language, theme and every option (default volume, Warp, key,
+  transposition, level matching, one folder, linking, numbering, kits, name pattern, template and
+  output folder) now survive a restart. Folders, pad assignments and locks still start from scratch.
+
+### Changed
+- Keyword matching is much faster (a 2,700-sample pack: from about 4 s per group to under 1 s for all
+  groups together, then instant), which also makes the interface start quicker with big packs.
+
 ## [1.14.0] - 2026-10-23
 
 ### Added

@@ -31,6 +31,7 @@ kits as you want, each with different random samples.
 - **Themes and pad look**: Dark, Light and Classic MPC themes (selector in the header, remembered between launches) and pads with volume and shadow.
 - **Choke per pad**: a "C" badge on each pad sets its mute group (1–32, or none), so Closed/Open Hihat taken from one Pack folder can cut each other off. Saved in presets.
 - **Long loops, Warp and key correction**: long samples keep their real end; names with a tempo ("128bpm") get Warp on automatically; with "Filter by key", samples in another key can be transposed to the kit's key.
+- **Preview, lock and layouts**: listen to each pad's sample (▶), re-roll it (🎲) or lock it (🔒) to keep it in every generated kit; one-click pad layouts for a Pack folder; optional volume evening; your settings are remembered between launches.
 - **All kits and samples in one folder** (option): instead of a folder per kit, every `.xpm` and all samples go straight into the output folder — easier to browse on the MPC, whose file browser can filter to show only kits. Identical samples are shared between kits; nothing existing is overwritten. Command line: `--flat` (config: `"flat_output": true`).
 - **Colors by keyword group**: give a group its own color (the small dot next to its dropdown) so every pad set to it matches, wherever it's assigned, overriding the folder's color just for that pad.
 - **Pad colors** per folder; pads that mix folders show diagonal stripes.
@@ -123,6 +124,7 @@ pulsas los pads y obtienes tantos kits como quieras, cada uno con muestras aleat
 - **Temas y aspecto de los pads**: temas Oscuro, Claro y MPC clásico (selector en la cabecera, se recuerda entre sesiones) y pads con volumen y sombra.
 - **Choke por pad**: una insignia «C» en cada pad fija su grupo de silencio (1–32, o ninguno), así el Closed/Open Hihat de un mismo Pack pueden cortarse entre sí. Se guarda en los presets.
 - **Loops largos, Warp y corrección de tonalidad**: los samples largos conservan su final real; los nombres con tempo («128bpm») activan Warp automáticamente; con «Filtrar por tonalidad», los samples de otra tonalidad se pueden transponer a la del kit.
+- **Previsualización, bloqueo y disposiciones**: escucha la muestra de cada pad (▶), cámbiala (🎲) o bloquéala (🔒) para conservarla en todos los kits generados; disposiciones de pads con un clic para una carpeta Pack; igualado de volumen opcional; tus ajustes se recuerdan entre sesiones.
 - **Todos los kits y samples en una sola carpeta** (opción): en vez de una carpeta por kit, todos los `.xpm` y los samples van directamente a la carpeta de salida — más cómodo en la MPC, cuyo navegador puede filtrar para mostrar solo kits. Los samples idénticos se comparten entre kits y no se sobrescribe nada. Línea de comandos: `--flat` (config: `"flat_output": true`).
 - **Colores por grupo de palabras clave**: dale a un grupo su propio color (el puntito junto a su desplegable) para que todos los pads con ese grupo lo lleven, dondequiera que estén, sustituyendo al color de la carpeta solo en esos pads.
 - **Colores de pad** por carpeta; los pads con varias carpetas se ven con franjas diagonales.

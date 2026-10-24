@@ -7,7 +7,7 @@ Usage:  python3 kit_creator_gui.py     (keep mpc_kit_creator.py in the same fold
 Quit with Ctrl+C in the Terminal. The interface language (English / Español) can be
 switched inside the app; it starts in your browser's language.
 """
-import json, os, secrets, shutil, subprocess, sys, threading, time, webbrowser
+import json, os, random, re, secrets, shutil, subprocess, sys, threading, time, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -39,6 +39,7 @@ PAL_FILE = DATA / "mpc_palette.json"
 PRESETS_FILE = DATA / "mpc_presets.json"
 GROUPS_FILE = DATA / "keyword_groups.txt"
 GROUP_COLORS_FILE = DATA / "group_colors.json"
+LAYOUTS_FILE = DATA / "layout_templates.json"
 for _name in ("kit_creator_state.json", "mpc_palette.json"):   # v1.0/1.1 kept them next to the script
     _old = HERE / _name
     if DATA != HERE and _old.is_file() and not (DATA / _name).exists():
@@ -204,6 +205,19 @@ def clean_padmap_entry(e):
     return str(e)
 
 
+def clean_locks(d):
+    """{pad: Path} from the page's locked samples; anything that isn't a pad number -> path is dropped."""
+    out = {}
+    if isinstance(d, dict):
+        for k, v in d.items():
+            try:
+                if int(k) >= 1 and isinstance(v, str) and v:
+                    out[int(k)] = Path(v)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def clean_volume_db(v):
     """The default pad volume from the page: a number of dB between -24 and 0 (anything else = 0)."""
     try:
@@ -249,23 +263,204 @@ def palette():
     return pal
 
 
+# ---------------------------------------------------------------- pad layout templates
+# A template says which keyword group goes on each of the 16 pads of a bank (pad 1 = bottom-left)
+# and which pads choke each other, independently of any folder: applied to a Pack folder, it fills
+# a bank in one click. The built-ins use the default group names; a group that doesn't exist in the
+# person's file is simply skipped (and reported) when applying.
+def _grid(*rows):
+    """rows are listed bottom row first, 4 groups each -> {pad: group}"""
+    return {str(i + 1): g for i, g in enumerate(x for r in rows for x in r)}
+
+
+BUILTIN_LAYOUTS = {
+    "drums": {"names": {"en": "Drum kit", "es": "Kit de batería"},
+              "pads": _grid(("Kick", "Snare", "Closed Hihat", "Open Hihat"),
+                            ("Kick", "Clap", "Closed Hihat", "Percusion"),
+                            ("Percusion", "Percusion", "Fill", "FX"),
+                            ("Percusion", "Percusion", "FX", "Vocal")),
+              "choke": {"3": 1, "4": 1, "7": 1}},
+    "drums_synth": {"names": {"en": "Drums + synths", "es": "Batería + sintes"},
+                    "pads": _grid(("Kick", "Snare", "Closed Hihat", "Open Hihat"),
+                                  ("Kick", "Clap", "Closed Hihat", "Percusion"),
+                                  ("Bass", "Bass", "Lead", "Pluck"),
+                                  ("Chord", "Stab", "Pad", "FX")),
+                    "choke": {"3": 1, "4": 1, "7": 1}},
+    "melodic": {"names": {"en": "Melodic palette", "es": "Paleta melódica"},
+                "pads": _grid(("Bass", "Bass", "Lead", "Lead"),
+                              ("Pluck", "Pluck", "Chord", "Chord"),
+                              ("Stab", "Pad", "Arp", "Keys"),
+                              ("Acid", "FX", "Vocal", "Fill")),
+                "choke": {}},
+    "loops": {"names": {"en": "Loops", "es": "Loops"},
+              "pads": _grid(("Loop Drums",) * 4, ("Loop Bass",) * 4, ("Loop Synth",) * 4,
+                            ("Loop Vocal", "Loop FX", "Loop FX", "Loop")),
+              "choke": {}},
+}
+
+
+def load_layouts():
+    """User-saved templates: {name: {"pads": {"1": group}, "choke": {"2": n}}}."""
+    try:
+        d = json.loads(LAYOUTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): clean_layout(v) for k, v in d.items()} if isinstance(d, dict) else {}
+
+
+def clean_layout(v):
+    """Keeps only pads 1-16 -> non-empty group name and chokes 0-32 for those pads."""
+    pads, choke = {}, {}
+    if isinstance(v, dict):
+        for k, g in (v.get("pads") or {}).items():
+            if str(k).isdigit() and 1 <= int(k) <= 16 and isinstance(g, str) and g.strip():
+                pads[str(int(k))] = g.strip()
+        for k, c in (v.get("choke") or {}).items():
+            try:
+                if str(k).isdigit() and 1 <= int(k) <= 16 and 0 <= int(c) <= 32 and int(c):
+                    choke[str(int(k))] = int(c)
+            except (TypeError, ValueError):
+                pass
+    return {"pads": pads, "choke": choke}
+
+
+def store_layouts(d):
+    tmp = LAYOUTS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, LAYOUTS_FILE)
+
+
+# ---------------------------------------------------------------- pad preview (listen, re-roll, lock)
+MATCH_CACHE = {}          # keyword-match results kept between previews (cleared on a rescan)
+PREVIEW_OK = set()      # files /api/audio may serve: only ones the preview itself has handed out
+
+
+def preview_kit(st):
+    """Picks one sample per assigned pad, the way a generated kit would, for the page to show and
+    play. st is the page state plus: `current` {pad: path} (the kit being edited), `only` [pads]
+    (re-roll just these, keeping the other current picks), `key` (the kit's key, kept on re-rolls).
+    Locked pads (st["locks"]) always keep their sample."""
+    pads, _colors, _mutes = build_job_pads(st)
+    if len(MATCH_CACHE) > 400:
+        MATCH_CACHE.clear()
+    if not pads:
+        return {"picks": {}, "key": None, "unmatched": []}
+    transpose = bool(st.get("transposeKey"))
+    want_key = st.get("matchKey") or None
+    src = kc.prepare_sources(pads, bool(st.get("recursive", True)), want_key)
+    match_key = src["match_key"]
+    target = None
+    if match_key:
+        keep = st.get("key")
+        if keep in src["available_keys"]:
+            target = keep
+        elif match_key in (True, "random"):
+            target = random.choice(src["available_keys"])
+        else:
+            target = match_key
+    locks = clean_locks(st.get("locks"))
+    only = {int(p) for p in (st.get("only") or []) if str(p).isdigit()}
+    fixed = {p: f for p, f in clean_locks(st.get("current")).items() if p not in only}
+    fixed.update({p: f for p, f in locks.items() if p not in only})
+    unmatched, fallback, tonal = [], [], set()
+    chosen = kc.pick_samples(pads, src["cache"], random.Random(), target, src["folder_keys"],
+                             src["tonal_folders"], fallback, unmatched, MATCH_CACHE,
+                             transpose=bool(transpose and target), tonal_pads=tonal, fixed=fixed)
+    picks = {}
+    for pad, f in chosen.items():
+        k = kc.parse_key(f.name)
+        shift = kc.key_shift(k, target) if (transpose and target and pad in tonal and k) else 0
+        try:
+            PREVIEW_OK.add(str(f.resolve()))
+        except OSError:
+            continue
+        picks[str(pad)] = {"path": str(f), "name": f.name, "shift": shift,
+                           "loop": bool(kc.looks_like_loop(f) or kc._is_loop_pad(pads.get(pad, []))),
+                           "key": k}
+    return {"picks": picks, "key": target, "unmatched": sorted(set(unmatched))}
+
+
+def aiff_to_wav(path):
+    """WAV bytes for a PCM .aif(f) file (browsers rarely play AIFF), or None if it isn't plain PCM."""
+    raw = Path(path).read_bytes()
+    if raw[:4] != b"FORM" or raw[8:12] not in (b"AIFF", b"AIFC"):
+        return None
+    pos, comm, ssnd = 12, None, None
+    while pos + 8 <= len(raw):
+        cid, size = raw[pos:pos + 4], int.from_bytes(raw[pos + 4:pos + 8], "big")
+        body = raw[pos + 8:pos + 8 + size]
+        if cid == b"COMM":
+            comm = body
+        elif cid == b"SSND":
+            ssnd = body[8:]
+        pos += 8 + size + (size & 1)
+    if comm is None or ssnd is None:
+        return None
+    if raw[8:12] == b"AIFC" and comm[18:22] != b"NONE":
+        return None
+    chans, bits = int.from_bytes(comm[0:2], "big"), int.from_bytes(comm[6:8], "big")
+    exp = int.from_bytes(comm[8:10], "big") & 0x7FFF
+    rate = int(int.from_bytes(comm[10:18], "big") * 2 ** (exp - 16383 - 63))
+    width = (bits + 7) // 8
+    if bits not in (8, 16, 24, 32) or not chans or not rate:
+        return None
+    if width == 1:
+        data = bytes((b + 128) & 255 for b in ssnd)          # AIFF 8-bit is signed, WAV's is unsigned
+    else:
+        out = bytearray(len(ssnd))
+        for i in range(width):
+            out[i::width] = ssnd[width - 1 - i::width]        # big-endian -> little-endian
+        data = bytes(out)
+    fmt = (1).to_bytes(2, "little") + chans.to_bytes(2, "little") + rate.to_bytes(4, "little") + \
+        (rate * chans * width).to_bytes(4, "little") + (chans * width).to_bytes(2, "little") + bits.to_bytes(2, "little")
+    body = b"WAVE" + b"fmt " + (16).to_bytes(4, "little") + fmt + b"data" + len(data).to_bytes(4, "little") + data
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
 PICKER = None   # set by the desktop app: a function (kind, lang) -> (path | list | None, error)
+
+
+# What survives from one launch to the next: the interface choices and the options (everything but
+# the folders, pad assignments, locks and the seed, which start from scratch each time).
+PERSIST_KEYS = ("lang", "theme", "template", "output", "kits", "name", "recursive", "clear", "hardlink",
+                "matchKey", "transposeKey", "padNumbering", "flatOutput", "warpBpm", "padVolume", "matchLevel")
+
+
+def persistent_settings(old):
+    """Picks the savable settings out of an old state dict, checking each one's type/range."""
+    keep = {}
+    if not isinstance(old, dict):
+        return keep
+    for k in PERSIST_KEYS:
+        if k not in old:
+            continue
+        v = old[k]
+        if k == "lang":
+            ok = v in kc.MSG
+        elif k == "theme":
+            ok = v in THEMES
+        elif k in ("template", "output", "name", "matchKey"):
+            ok = isinstance(v, str) and len(v) < 1000
+        elif k == "kits":
+            ok = isinstance(v, (int, str)) and not isinstance(v, bool) and len(str(v)) < 6
+        elif k == "padVolume":
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and -24 <= v <= 0
+        else:
+            ok = isinstance(v, bool)
+        if ok:
+            keep[k] = v
+    return keep
 
 
 def fresh_session():
     """Forget the previous session: the page starts empty (no folders, no pad assignments), so the
-    person picks a preset or adds folders from scratch. Only the interface language is kept.
+    person picks a preset or adds folders from scratch. Only the settings in PERSIST_KEYS are kept (language, theme and options).
     Presets, keyword groups and colors are untouched. Reloading the page during a session keeps
     that session's own state, since this only runs when the app starts."""
-    keep = {}
     try:
-        old = json.loads(STATE_FILE.read_text())
-        if isinstance(old, dict) and old.get("lang") in kc.MSG:
-            keep["lang"] = old["lang"]
-        if isinstance(old, dict) and old.get("theme") in THEMES:
-            keep["theme"] = old["theme"]
+        keep = persistent_settings(json.loads(STATE_FILE.read_text()))
     except (OSError, ValueError):
-        pass
+        keep = {}
     try:
         STATE_FILE.write_text(json.dumps(keep, indent=1))
     except OSError:
@@ -297,6 +492,44 @@ def pick(kind, lang="en"):
     return (p.rstrip("/") or "/"), None
 
 
+def build_job_pads(st, log=lambda m: None):
+    """Turns the page state into what the engine takes: ({pad: [folder or (folder, keywords, context)]},
+    {pad: color}, {pad: choke}). Used by both the generator and the pad preview."""
+    folders = {f["id"]: f for f in st["folders"]}
+    groups = load_groups()
+    group_colors = load_group_colors()
+    pads, colors, mutes = {}, {}, {}
+    pad_chokes = clean_pad_chokes(st.get("padChoke"))
+    ctx = tuple(tuple(v) for v in groups.values())     # all groups, so overlaps are resolved
+    for pad, entries in st["padmap"].items():
+        entries = entries if isinstance(entries, list) else [entries]
+        items, used_folders, used_groups = [], [], []
+        for e in entries:
+            fid = e["id"] if isinstance(e, dict) else e
+            f = folders.get(fid)
+            if not f:
+                continue
+            path = Path(f["path"]).expanduser()
+            group = e.get("group") if isinstance(e, dict) else None
+            kw = groups.get(group) if group else None
+            if group and not kw:        # never fall back to "the whole pack" for a typo/rename
+                log(kc.msg("group_missing", pad=pad, group=group))
+                continue
+            items.append((path, kw, ctx) if kw else path)
+            used_folders.append(f)
+            used_groups.append(group)
+        if items:   # the pad's color and mute group are those of its first folder, unless
+                    # that entry's keyword group has its own color (see load_group_colors)
+            pads[int(pad)] = items
+            override = group_colors.get(used_groups[0]) if used_groups[0] else None
+            colors[int(pad)] = int(override if override else (used_folders[0].get("color") or 0))
+            mutes[int(pad)] = int(used_folders[0].get("mute") or 0)
+            pc = pad_chokes.get(str(pad))       # a choke set on the pad itself wins over its folder's
+            if pc is not None:
+                mutes[int(pad)] = pc
+    return pads, colors, mutes
+
+
 def run_job(st):
     JOB.update(log=[], done=False, error=None)
     log = JOB["log"].append
@@ -305,38 +538,7 @@ def run_job(st):
     try:
         tpl = (st.get("template") or "").strip()
         template = Path(tpl).expanduser().read_text(encoding="utf-8") if tpl else kc.default_template()
-        folders = {f["id"]: f for f in st["folders"]}
-        groups = load_groups()
-        group_colors = load_group_colors()
-        pads, colors, mutes = {}, {}, {}
-        pad_chokes = clean_pad_chokes(st.get("padChoke"))
-        ctx = tuple(tuple(v) for v in groups.values())     # all groups, so overlaps are resolved
-        for pad, entries in st["padmap"].items():
-            entries = entries if isinstance(entries, list) else [entries]
-            items, used_folders, used_groups = [], [], []
-            for e in entries:
-                fid = e["id"] if isinstance(e, dict) else e
-                f = folders.get(fid)
-                if not f:
-                    continue
-                path = Path(f["path"]).expanduser()
-                group = e.get("group") if isinstance(e, dict) else None
-                kw = groups.get(group) if group else None
-                if group and not kw:        # never fall back to "the whole pack" for a typo/rename
-                    log(kc.msg("group_missing", pad=pad, group=group))
-                    continue
-                items.append((path, kw, ctx) if kw else path)
-                used_folders.append(f)
-                used_groups.append(group)
-            if items:   # the pad's color and mute group are those of its first folder, unless
-                        # that entry's keyword group has its own color (see load_group_colors)
-                pads[int(pad)] = items
-                override = group_colors.get(used_groups[0]) if used_groups[0] else None
-                colors[int(pad)] = int(override if override else (used_folders[0].get("color") or 0))
-                mutes[int(pad)] = int(used_folders[0].get("mute") or 0)
-                pc = pad_chokes.get(str(pad))       # a choke set on the pad itself wins over its folder's
-                if pc is not None:
-                    mutes[int(pad)] = pc
+        pads, colors, mutes = build_job_pads(st, log)
         if not pads:
             raise ValueError(kc.msg("no_pads"))
         seed = int(st["seed"]) if str(st.get("seed", "")).strip() else None
@@ -347,7 +549,8 @@ def run_job(st):
                          match_key=match_key, pad_numbering=bool(st.get("padNumbering")),
                          flat_output=bool(st.get("flatOutput")),
                          warp_bpm=bool(st.get("warpBpm", True)), transpose_key=bool(st.get("transposeKey")),
-                         pad_volume_db=clean_volume_db(st.get("padVolume")))
+                         pad_volume_db=clean_volume_db(st.get("padVolume")),
+                         match_level=bool(st.get("matchLevel")), locked=clean_locks(st.get("locks")))
     except Exception as e:  # show any error in the interface
         JOB["error"] = f"{type(e).__name__}: {e}"
     JOB["done"] = True
@@ -373,8 +576,59 @@ class H(BaseHTTPRequestHandler):
             return False
         return True
 
+    def serve_audio(self, raw_path):
+        q = parse_qs(urlparse(raw_path).query)
+        if q.get("t", [""])[0] != TOKEN:
+            return self.send({"error": "token"}, 403)
+        SEEN["last"] = time.time()
+        want = (q.get("p") or [""])[0]
+        try:
+            f = Path(want).resolve()
+        except (OSError, ValueError):
+            return self.send({"error": "404"}, 404)
+        if str(f) not in PREVIEW_OK or not f.is_file():          # only files the preview handed out
+            return self.send({"error": "404"}, 404)
+        try:
+            if f.suffix.lower() in (".aif", ".aiff"):
+                data = aiff_to_wav(f)
+                if data is None:
+                    return self.send({"error": "format"}, 415)
+            else:
+                data = f.read_bytes()
+        except OSError:
+            return self.send({"error": "404"}, 404)
+        total, start, end, code = len(data), 0, len(data) - 1, 200
+        m = re.match(r"bytes=(\d*)-(\d*)$", self.headers.get("Range", ""))
+        if m and (m.group(1) or m.group(2)):                    # Safari/WebKit insist on byte ranges
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), total - 1) if m.group(2) else total - 1
+            else:
+                start = max(0, total - int(m.group(2)))
+            if start > end or start >= total:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{total}")
+                self.end_headers()
+                return
+            code = 206
+        chunk = data[start:end + 1]
+        self.send_response(code)
+        self.send_header("Content-Type", "audio/wav" if f.suffix.lower() in (".wav", ".aif", ".aiff") else "application/octet-stream")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(len(chunk)))
+        if code == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+        self.end_headers()
+        try:
+            self.wfile.write(chunk)
+        except OSError:
+            pass
+
     def do_GET(self):
+        raw = self.path
         self.path = urlparse(self.path).path
+        if self.path == "/api/audio":
+            return self.serve_audio(raw)
         if self.path == "/":
             return self.send(PAGE.replace("__TOKEN__", TOKEN).replace("__VERSION__", kc.__version__),
                              ctype="text/html")
@@ -387,6 +641,7 @@ class H(BaseHTTPRequestHandler):
                 st = None
             return self.send({"state": st, "palette": palette(), "presets": load_presets(),
                               "keywordGroups": load_groups(), "groupColors": load_group_colors(),
+                              "layouts": {"builtin": BUILTIN_LAYOUTS, "user": load_layouts()},
                               "mac": sys.platform == "darwin"})
         if self.path == "/api/job":
             return self.send(JOB)
@@ -464,6 +719,29 @@ class H(BaseHTTPRequestHandler):
             elif action != "get":
                 return self.send({"error": "invalid"})
             return self.send({"groups": load_groups(), "groupColors": load_group_colors()})
+        if self.path == "/api/preview":
+            if not isinstance(data, dict) or not isinstance(data.get("padmap"), dict):
+                return self.send({"error": "invalid"})
+            try:
+                return self.send(preview_kit(data))
+            except FileNotFoundError as e:
+                return self.send({"error": str(e)})
+            except (KeyError, TypeError, ValueError) as e:
+                return self.send({"error": f"{type(e).__name__}: {e}"})
+        if self.path == "/api/layouts":
+            user = load_layouts()
+            name = str(data.get("name", "")).strip()[:60]
+            if data.get("action") == "save":
+                lay = clean_layout(data)
+                if not name or not lay["pads"]:
+                    return self.send({"error": "invalid"})
+                user[name] = lay
+            elif data.get("action") == "delete":
+                user.pop(name, None)
+            else:
+                return self.send({"error": "invalid"})
+            store_layouts(user)
+            return self.send({"layouts": {"builtin": BUILTIN_LAYOUTS, "user": user}})
         if self.path == "/api/edit_groups":
             load_groups()      # make sure the file exists with real content before opening it
             try:
@@ -477,6 +755,7 @@ class H(BaseHTTPRequestHandler):
                           key=str.lower) if d.is_dir() else []
             return self.send({"paths": subs})
         if self.path == "/api/scan":
+            MATCH_CACHE.clear()        # the folder may have changed: forget earlier keyword matches
             d = Path(data["path"]).expanduser()
             rec = True if data.get("pack") else data.get("recursive", True)
             files = []
@@ -568,7 +847,15 @@ input[type=checkbox]{accent-color:var(--ac)}
  box-shadow:0 5px 0 #0008,0 10px 14px #0006,inset 0 1px 1px #fff6,inset 0 -14px 18px #0000004d;text-shadow:0 1px 2px #0008;transition:transform .06s,box-shadow .06s,filter .1s}
 .pad::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:radial-gradient(120% 80% at 30% 0%,#ffffff55,#fff0 55%),linear-gradient(#fff0 55%,#0003)}
 .pad>*{position:relative}
-.pad .padchokewrap{position:absolute}
+.pad .pad .padname{position:absolute;left:4px;right:4px;bottom:26px;width:auto;font-size:9px;font-weight:500;opacity:.95;text-shadow:0 1px 2px #000a}
+.pad.lt .padname{text-shadow:none}
+.pad .padctl{position:absolute;left:4px;bottom:4px;display:flex;gap:3px}
+.padctl button{width:19px;height:19px;padding:0;border-radius:50%;font-size:10px;line-height:1;background:#000b;color:#fff;border:1px solid #fff7;box-shadow:none;text-shadow:none}
+.padctl button:hover{background:#000}.padctl button.on{background:#f2b705;color:#111;border-color:#fff}
+.pad.playing{outline:3px solid #fff;outline-offset:-3px}
+.pvbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 10px}.pvbar .keychip{margin-left:auto;font-size:12px;color:var(--mu)}
+.lay{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:10px}.lay select{flex:1;min-width:140px}
+.padchokewrap{position:absolute}
 .pad .n{position:absolute;top:5px;left:8px;font-size:11px;opacity:.85}
 .pad:hover{filter:brightness(1.12)}
 .pad:active{transform:translateY(4px);box-shadow:0 1px 0 #0008,0 3px 6px #0006,inset 0 1px 1px #fff4,inset 0 -8px 12px #00000040}
@@ -647,9 +934,13 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
  <section><h2><span data-i18n="sec_pads"></span> · <span id="bname"></span></h2>
   <div class="tabs" id="tabs"></div>
   <label class="chk" style="margin:0 0 10px"><input type="checkbox" id="mix"><span data-i18n="chk_mix"></span></label>
+  <div class="pvbar"><button class="pri" id="btnPreview" onclick="doPreview()" data-i18n="btn_preview" data-title="title_preview"></button><button onclick="lockAll()" data-i18n="btn_lockall"></button><button onclick="unlockAll()" data-i18n="btn_unlockall"></button><span class="keychip" id="kitKey"></span></div>
   <div class="grid" id="pads"></div>
   <div class="row" style="margin-top:10px"><button onclick="fillBank()" data-i18n="btn_fill"></button><button onclick="clearBank()" data-i18n="btn_clearbank"></button></div>
   <div class="row"><span style="color:var(--mu)" data-i18n="lbl_copy"></span><select class="big" id="copyTo" onchange="copyTarget=this.value"></select><button onclick="copyBank()" data-i18n="btn_copy"></button></div>
+  <div class="lay"><span style="color:var(--mu)" data-i18n="lbl_layout"></span><select class="big" id="layoutSel"></select><button id="btnLayApply" onclick="applyLayout()" data-i18n="btn_layapply"></button><button id="btnLaySave" onclick="saveLayout()" data-i18n="btn_laysave"></button><button id="btnLayDel" onclick="deleteLayout()" data-i18n="btn_laydel"></button></div>
+  <div class="hint" data-i18n="hint_layout"></div>
+  <div class="hint" data-i18n="hint_preview"></div>
   <div class="hint" data-i18n="hint_pads"></div>
  </section>
 </div>
@@ -669,6 +960,8 @@ html[data-theme=mpc] header select{background:#3d3d40;color:#ece8da;border-color
   <label class="chk"><input type="checkbox" id="warpBpm"><span data-i18n="chk_warp"></span></label>
   <div class="hint" data-i18n="hint_warp"></div>
   <label class="chk"><input type="checkbox" id="clear"><span data-i18n="chk_clear"></span></label>
+  <label class="chk"><input type="checkbox" id="matchLevel"><span data-i18n="chk_level"></span></label>
+  <div class="hint" data-i18n="hint_level"></div>
   <div class="row" style="margin:6px 0 0"><label style="width:auto" data-i18n="lbl_padvol"></label><select class="big" id="padVolume"></select></div>
   <div class="hint" data-i18n="hint_padvol"></div>
   <h4 data-i18n="opt_sec_key"></h4>
@@ -711,6 +1004,19 @@ en:{sec_presets:"Presets",btn_pload:"Load",btn_psave:"Save…",btn_pdel:"Delete"
  sec_output:"Output",lbl_template:"Template",btn_othertpl:"Use another .xpm…",btn_builtin:"Built-in",title_builtin:"Back to the built-in template",
  lbl_folder:"Folder",btn_choose:"Choose…",lbl_kits:"No. of kits",lbl_name:"Name",lbl_seed:"Seed",ph_seed:"(optional) same seed = same kits",
  chk_recursive:"Include subfolders",chk_clear:"Empty and uncolor unassigned pads",lbl_padvol:"Default pad volume",hint_padvol:"Lowers every assigned pad by this amount (0 dB = unchanged). Samples taken straight from a pack are usually mastered hot, so −3 to −6 dB leaves room on the MPC's master.",opt_vol:"{0} dB",
+ btn_preview:"🎲 Preview kit",title_preview:"Pick a sample for every assigned pad, like a generated kit would — then listen (▶), re-roll a pad (🎲) or lock it (🔒)",btn_lockall:"🔒 Lock all",btn_unlockall:"🔓 Unlock all",
+ pv_play:"Listen",pv_reroll:"Pick another sample for this pad",pv_lock:"Lock: this pad keeps this sample in every generated kit",pv_unlock:"Unlock",
+ pv_none:"Assign some pads first",pv_working:"Picking samples…",pv_unmatched:"No sample found for pad(s): {0}",pv_cant_play:"This file can't be played here",pv_key:"Kit key: {0}",pv_locked:"{0} locked pad(s)",
+ hint_preview:"“Preview kit” picks a sample for each pad. Listen to it with ▶ (a transposed sample plays pitched), 🎲 picks another for that pad only, and 🔒 locks the pad: it keeps that exact sample in every kit you generate, while the other pads stay random — handy to look for combinations around a few sounds. To export exactly the kit you hear, lock all pads and generate 1 kit.",
+ lbl_layout:"Layout:",btn_layapply:"Apply to bank",btn_laysave:"Save bank…",btn_laydel:"Delete",layout_none:"— choose a layout —",
+ lay_builtin:"Built-in",lay_user:"Mine",
+ hint_layout:"A layout puts a keyword group on each pad of the bank (and the choke for hi-hats), for the Pack folder selected on the left — switch to another pack and apply it again, no need to start over.",
+ lay_need_pack:"Select a Pack folder on the left first (or tick “Pack” on one)",lay_packify:"“{0}” is not marked as a Pack. Mark it and apply the layout?",
+ lay_replace:"Replace the pads of bank {0} with layout “{1}”?",lay_applied:"Layout “{0}” applied to bank {1}: {2} pad(s)",lay_skipped:" · {0} skipped (group not found: {1})",
+ lay_name:"Layout name:",lay_overwrite:"A layout called “{0}” already exists. Overwrite it?",lay_saved:"Layout “{0}” saved ({1} pad(s))",lay_nothing:"This bank has no pads using a keyword group, so there is nothing to save",
+ lay_delete_confirm:"Delete layout “{0}”?",
+ chk_level:"Even out the volume of the pads",hint_level:"Measures each sample (its loudest 100 ms) and corrects the pad volumes toward the kit's median loudness, within −9 dB / +3 dB. It adds to the default volume below. Loops and one-shots are treated alike.",
+ opt_level:"even levels",
  btn_options:"⚙ Options…",opt_title:"Options",opt_close:"Done",opt_sec_samples:"Samples",opt_sec_key:"Key",opt_sec_output:"Output",
  opt_sum_none:"Default options",opt_warp:"Warp loops",opt_key:"key {0}",opt_transpose:"transposing",opt_flat:"one folder",opt_link:"linking",opt_padnum:"pad numbering",opt_norec:"no subfolders",opt_keep:"keep other pads",
  chk_warp:"Warp loops (follow the project's tempo)",
@@ -767,6 +1073,19 @@ es:{sec_presets:"Presets",btn_pload:"Cargar",btn_psave:"Guardar…",btn_pdel:"Bo
  sec_output:"Salida",lbl_template:"Plantilla",btn_othertpl:"Usar otro .xpm…",btn_builtin:"Integrada",title_builtin:"Volver a la plantilla integrada",
  lbl_folder:"Carpeta",btn_choose:"Elegir…",lbl_kits:"Nº de kits",lbl_name:"Nombre",lbl_seed:"Semilla",ph_seed:"(opcional) misma semilla = mismos kits",
  chk_recursive:"Incluir subcarpetas",chk_clear:"Vaciar y sin color en pads sin asignar",lbl_padvol:"Volumen por defecto de los pads",hint_padvol:"Baja todos los pads asignados esta cantidad (0 dB = sin cambios). Los samples de un pack suelen venir masterizados muy fuertes, así que de −3 a −6 dB deja margen en el master de la MPC.",opt_vol:"{0} dB",
+ btn_preview:"🎲 Previsualizar kit",title_preview:"Elige una muestra para cada pad asignado, como haría un kit generado — y luego escúchala (▶), cambia un pad (🎲) o bloquéalo (🔒)",btn_lockall:"🔒 Bloquear todo",btn_unlockall:"🔓 Desbloquear todo",
+ pv_play:"Escuchar",pv_reroll:"Elegir otra muestra solo para este pad",pv_lock:"Bloquear: este pad conserva esta muestra en todos los kits generados",pv_unlock:"Desbloquear",
+ pv_none:"Asigna primero algún pad",pv_working:"Eligiendo muestras…",pv_unmatched:"No hay muestras para el/los pad(s): {0}",pv_cant_play:"Este archivo no se puede reproducir aquí",pv_key:"Tonalidad del kit: {0}",pv_locked:"{0} pad(s) bloqueados",
+ hint_preview:"«Previsualizar kit» elige una muestra para cada pad. Escúchala con ▶ (una muestra transpuesta suena ya cambiada de tono), 🎲 elige otra solo para ese pad, y 🔒 bloquea el pad: conserva exactamente esa muestra en todos los kits que generes, mientras los demás pads siguen al azar — ideal para buscar combinaciones alrededor de unos pocos sonidos. Para exportar justo el kit que oyes, bloquea todos los pads y genera 1 kit.",
+ lbl_layout:"Disposición:",btn_layapply:"Aplicar al banco",btn_laysave:"Guardar banco…",btn_laydel:"Borrar",layout_none:"— elige una disposición —",
+ lay_builtin:"Incluidas",lay_user:"Mías",
+ hint_layout:"Una disposición pone un grupo de palabras clave en cada pad del banco (y el choke de los hi-hats), para la carpeta Pack seleccionada a la izquierda — cambia de pack y vuelve a aplicarla, sin empezar de cero.",
+ lay_need_pack:"Selecciona primero una carpeta Pack a la izquierda (o marca «Pack» en una)",lay_packify:"«{0}» no está marcada como Pack. ¿Marcarla y aplicar la disposición?",
+ lay_replace:"¿Sustituir los pads del banco {0} por la disposición «{1}»?",lay_applied:"Disposición «{0}» aplicada al banco {1}: {2} pad(s)",lay_skipped:" · {0} omitidos (grupo no encontrado: {1})",
+ lay_name:"Nombre de la disposición:",lay_overwrite:"Ya existe una disposición llamada «{0}». ¿Sobrescribirla?",lay_saved:"Disposición «{0}» guardada ({1} pad(s))",lay_nothing:"Este banco no tiene pads con un grupo de palabras clave, así que no hay nada que guardar",
+ lay_delete_confirm:"¿Borrar la disposición «{0}»?",
+ chk_level:"Igualar el volumen de los pads",hint_level:"Mide cada muestra (sus 100 ms más fuertes) y corrige el volumen de los pads hacia la sonoridad mediana del kit, entre −9 dB y +3 dB. Se suma al volumen por defecto de abajo. Loops y one-shots se tratan igual.",
+ opt_level:"volúmenes igualados",
  btn_options:"⚙ Opciones…",opt_title:"Opciones",opt_close:"Hecho",opt_sec_samples:"Samples",opt_sec_key:"Tonalidad",opt_sec_output:"Salida",
  opt_sum_none:"Opciones por defecto",opt_warp:"Warp en loops",opt_key:"tonalidad {0}",opt_transpose:"transponiendo",opt_flat:"una carpeta",opt_link:"enlazando",opt_padnum:"numeración de pads",opt_norec:"sin subcarpetas",opt_keep:"conservar otros pads",
  chk_warp:"Warp en los loops (siguen el tempo del proyecto)",
@@ -821,7 +1140,7 @@ function applyStatic(){
   for(const o of $("theme").options)o.textContent=t(`theme_${o.value}`);
   document.documentElement.lang=LANG}
 const colName=c=>{const m=/^Import(?:ed|ado) (\d+)$/.exec(c.name);return m?t("col.imported")+" "+m[1]:(I18N[LANG]["col."+c.name]||c.name)};
-const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",theme:"",preset:"",folders:[],padmap:{},padChoke:{},warpBpm:true,transposeKey:false,padVolume:0};
+const S={template:"",output:"",kits:10,name:"Kit {n:03d}",seed:"",recursive:true,clear:true,hardlink:false,mix:false,matchKey:"",padNumbering:false,flatOutput:false,lang:"",theme:"",preset:"",folders:[],padmap:{},padChoke:{},warpBpm:true,transposeKey:false,padVolume:0,matchLevel:false,locks:{},lockSig:{},preview:{},previewKey:null};
 let PAL=[],PRESETS={},GROUPS={},GROUPNAMES=[],GROUPCOLORS={},active=null,bank=0,palFor=null,palType="folder",MAC=true,saveT=null,copyTarget="all";
 const $=id=>document.getElementById(id), BANKS="ABCDEFGH";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1030,14 +1349,90 @@ function openChoke(n){const cur=S.padChoke[n];
    Array.from({length:32},(_,i)=>`<button class="${cur===i+1?"sel":""}" title="${esc(t("choke_n",i+1))}" onclick="setPadChoke(${n},${i+1})">${i+1}</button>`).join("");
   $("chk").style.display="flex"}
 function setPadChoke(n,v){if(v===null)delete S.padChoke[n];else S.padChoke[n]=v;$("chk").style.display="none";render();save()}
+// ---- preview: listen, re-roll, lock
+const padSig=n=>JSON.stringify(S.padmap[n]||[]);
+function prunePreview(){
+  for(const n in S.preview)if(S.preview[n].sig!==padSig(n))delete S.preview[n];
+  for(const n in S.locks)if(S.lockSig[n]!==padSig(n)){delete S.locks[n];delete S.lockSig[n]}}
+async function doPreview(only){
+  const m=$("msg");m.className="";
+  if(!Object.keys(S.padmap).length){m.textContent=t("pv_none");return}
+  m.textContent=t("pv_working");stopAudio();
+  const cur={};for(const n in S.preview)cur[n]=S.preview[n].path;
+  const r=await api("/api/preview",{...S,preview:undefined,current:cur,only:only||[],key:S.previewKey});
+  if(r.error){m.className="err";m.textContent=r.error;return}
+  m.textContent=r.unmatched&&r.unmatched.length?t("pv_unmatched",r.unmatched.join(", ")):"";
+  for(const n in r.picks){const pk=r.picks[n];if(only&&!only.includes(+n)&&S.preview[n])continue;S.preview[n]={...pk,sig:padSig(n)}}
+  for(const n in S.preview)if(!r.picks[n])delete S.preview[n];
+  S.previewKey=r.key;render();save()}
+function rerollPad(n){if(S.locks[n]){delete S.locks[n];delete S.lockSig[n]}doPreview([n])}
+function toggleLock(n){const pv=S.preview[n];if(!pv)return;
+  if(S.locks[n]){delete S.locks[n];delete S.lockSig[n]}else{S.locks[n]=pv.path;S.lockSig[n]=padSig(n)}render();save()}
+function lockAll(){for(const n in S.preview){S.locks[n]=S.preview[n].path;S.lockSig[n]=padSig(n)}render();save()}
+function unlockAll(){S.locks={};S.lockSig={};render();save()}
+let audioEl=null,audioPad=null;
+function stopAudio(){if(audioEl){audioEl.pause();audioEl=null}if(audioPad!==null){audioPad=null;document.querySelectorAll(".pad.playing").forEach(e=>e.classList.remove("playing"))}}
+function playPad(n){const pv=S.preview[n];if(!pv)return;const same=audioPad===n;stopAudio();if(same)return;
+  const a=new Audio(`/api/audio?t=${TOKEN}&p=${encodeURIComponent(pv.path)}`);
+  a.preservesPitch=a.mozPreservesPitch=a.webkitPreservesPitch=false;a.playbackRate=Math.pow(2,(pv.shift||0)/12);
+  audioEl=a;audioPad=n;const pad=document.querySelector(`.pad[data-n="${n}"]`);if(pad)pad.classList.add("playing");
+  a.onended=()=>{if(audioEl===a)stopAudio()};a.onerror=()=>{if(audioEl===a){stopAudio();$("msg").textContent=t("pv_cant_play")}};
+  a.play().catch(()=>{if(audioEl===a){stopAudio();$("msg").textContent=t("pv_cant_play")}})}
+// ---- layouts
+let LAYOUTS={builtin:{},user:{}};
+const layName=(k,b)=>b?((LAYOUTS.builtin[k].names||{})[LANG]||(LAYOUTS.builtin[k].names||{}).en||k):k;
+function layoutSelHtml(){const sel=$("layoutSel").value;
+  return `<option value="">${esc(t("layout_none"))}</option>`+
+   `<optgroup label="${esc(t("lay_builtin"))}">${Object.keys(LAYOUTS.builtin).map(k=>`<option value="b:${k}" ${sel==="b:"+k?"selected":""}>${esc(layName(k,true))}</option>`).join("")}</optgroup>`+
+   (Object.keys(LAYOUTS.user).length?`<optgroup label="${esc(t("lay_user"))}">${Object.keys(LAYOUTS.user).sort((a,b)=>a.localeCompare(b)).map(k=>`<option value="u:${esc(k)}" ${sel==="u:"+k?"selected":""}>${esc(k)}</option>`).join("")}</optgroup>`:"")}
+function layoutFor(v){if(!v)return null;const k=v.slice(2);return v[0]==="b"?{name:layName(k,true),...LAYOUTS.builtin[k]}:{name:k,...LAYOUTS.user[k]}}
+async function applyLayout(){
+  const lay=layoutFor($("layoutSel").value);if(!lay)return;
+  let f=S.folders.find(x=>x.id===active);
+  if(!f||!f.pack){const packs=S.folders.filter(x=>x.pack);
+    if(!f&&packs.length===1)f=packs[0];
+    else if(f&&!f.pack){if(!(await uiConfirm(t("lay_packify",f.path.split(/[\\/]/).pop()||f.path))))return;f.pack=true;await scan(f)}
+    else if(!f){$("msg").textContent=t("lay_need_pack");return}}
+  const base=bank*16,filled=[...Array(16).keys()].some(i=>(S.padmap[base+i+1]||[]).length);
+  if(filled&&!(await uiConfirm(t("lay_replace",BANKS[bank],lay.name))))return;
+  let n=0;const missing=new Set();
+  for(let i=1;i<=16;i++){const pad=base+i;delete S.padmap[pad];delete S.padChoke[pad];
+    const g=(lay.pads||{})[i];if(!g)continue;
+    if(!GROUPS[g]){missing.add(g);continue}
+    S.padmap[pad]=[{id:f.id,group:g}];n++;
+    const c=(lay.choke||{})[i];if(c)S.padChoke[pad]=c}
+  active=f.id;$("msg").textContent=t("lay_applied",lay.name,BANKS[bank],n)+(missing.size?t("lay_skipped",missing.size,[...missing].join(", ")):"");
+  render();save()}
+async function saveLayout(){
+  const pads={},choke={};
+  for(let i=1;i<=16;i++){const pad=bank*16+i,e=(S.padmap[pad]||[]).find(x=>entryGroup(x));if(!e)continue;
+    pads[i]=entryGroup(e);const c=padChokeOf(pad);if(c)choke[i]=c}
+  if(!Object.keys(pads).length){await uiAlert(t("lay_nothing"));return}
+  const cur=$("layoutSel").value;
+  const name=((await uiPrompt(t("lay_name"),cur[0]==="u"?cur.slice(2):""))||"").trim().slice(0,60);if(!name)return;
+  if(LAYOUTS.user[name]&&!(await uiConfirm(t("lay_overwrite",name))))return;
+  const r=await api("/api/layouts",{action:"save",name,pads,choke});if(r.error)return;
+  LAYOUTS=r.layouts;$("layoutSel").innerHTML=layoutSelHtml();$("layoutSel").value="u:"+name;
+  $("msg").textContent=t("lay_saved",name,Object.keys(pads).length);render()}
+async function deleteLayout(){
+  const v=$("layoutSel").value;if(!v||v[0]!=="u")return;const name=v.slice(2);
+  if(!(await uiConfirm(t("lay_delete_confirm",name))))return;
+  const r=await api("/api/layouts",{action:"delete",name});if(r.error)return;
+  LAYOUTS=r.layouts;$("layoutSel").value="";render()}
 function openOpts(){$("opt").style.display="flex"}
 function closeOpts(){$("opt").style.display="none"}
-function optSummary(){const o=[];if(+S.padVolume)o.push(t("opt_vol",(+S.padVolume).toString().replace("-","−")));if(S.warpBpm)o.push(t("opt_warp"));
+function optSummary(){const o=[];if(S.matchLevel)o.push(t("opt_level"));if(+S.padVolume)o.push(t("opt_vol",(+S.padVolume).toString().replace("-","−")));if(S.warpBpm)o.push(t("opt_warp"));
   if(S.matchKey){o.push(t("opt_key",S.matchKey==="random"?t("key_random").toLowerCase():S.matchKey));if(S.transposeKey)o.push(t("opt_transpose"))}
   if(S.flatOutput)o.push(t("opt_flat"));if(S.hardlink)o.push(t("opt_link"));if(S.padNumbering)o.push(t("opt_padnum"));
   if(!S.recursive)o.push(t("opt_norec"));if(!S.clear)o.push(t("opt_keep"));return o.join(" · ")||t("opt_sum_none")}
 function render(){
+  prunePreview();
   $("optSum").textContent=optSummary();
+  $("layoutSel").innerHTML=layoutSelHtml();
+  $("btnLayDel").disabled=!($("layoutSel").value||"").startsWith("u:");
+  $("btnPreview").disabled=!Object.keys(S.padmap).length;
+  const nl=Object.keys(S.locks).length;
+  $("kitKey").textContent=[S.previewKey?t("pv_key",S.previewKey):"",nl?t("pv_locked",nl):""].filter(Boolean).join(" · ");
   if(!$("padVolume").options.length)$("padVolume").innerHTML=[0,-1,-2,-3,-4,-5,-6].map(v=>`<option value="${v}">${v===0?"0 dB":v.toString().replace("-","−")+" dB"}</option>`).join("");
   $("padVolume").value=String(+S.padVolume||0);
   if(!S.padChoke||typeof S.padChoke!=="object")S.padChoke={};
@@ -1069,13 +1464,16 @@ function render(){
      return `<span class="padcolor" style="background:${css(entryColor(e,f))}" onclick="event.stopPropagation();openPalGroup('${jsq(g)}')" title="${esc(t('group_color_title',g))}"></span>`}).join("");
    const lt=f&&(pairs.reduce((a,x)=>a+lumOf(entryColor(x.e,x.f)),0)/pairs.length)>.62;
    const eff=f?padChokeOf(n):0,chip=f&&(pairs.some(x=>x.f.pack)||eff>0||S.padChoke[n]!==undefined)?`<button class="padchoke${S.padChoke[n]===undefined?" dim":""}" title="${esc(t("choke_title",n))}" onclick="event.stopPropagation();openChoke(${n})">C${eff||"–"}</button>`:"";
-   h+=`<div class="pad${f?" on":""}${lt?" lt":""}" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span class="n">${n}</span>${body}${dots?`<div class="padtools">${dots}</div>`:""}${chip?`<div class="padchokewrap">${chip}</div>`:""}</div>`}
+   const pv=f&&S.preview[n],lk=!!S.locks[n];
+   const pvName=pv?`<small class="padname">${esc(pv.name.replace(/\.[^.]+$/,""))}${pv.shift?` · ${pv.shift>0?"+":"−"}${Math.abs(pv.shift)}`:""}</small>`:"";
+   const ctl=pv?`<div class="padctl"><button title="${esc(t("pv_play"))}" onclick="event.stopPropagation();playPad(${n})">▶</button><button title="${esc(t("pv_reroll"))}" onclick="event.stopPropagation();rerollPad(${n})">🎲</button><button class="${lk?"on":""}" title="${esc(lk?t("pv_unlock"):t("pv_lock"))}" onclick="event.stopPropagation();toggleLock(${n})">${lk?"🔒":"🔓"}</button></div>`:"";
+   h+=`<div class="pad${f?" on":""}${lt?" lt":""}${audioPad===n?" playing":""}" data-n="${n}" title="${esc(titleTxt)}" style="${f?`background:${bg}`:""}" onclick="padClick(${n},event)"><span class="n">${n}</span>${body}${pvName}${ctl}${dots?`<div class="padtools">${dots}</div>`:""}${chip?`<div class="padchokewrap">${chip}</div>`:""}</div>`}
   $("pads").innerHTML=h;
   const ct=[...Array(8).keys()].filter(b=>b!==bank);if(copyTarget!=="all"&&+copyTarget===bank)copyTarget="all";
   $("copyTo").innerHTML=`<option value="all">${t("opt_all")}</option>`+ct.map(b=>`<option value="${b}">${t("bank",BANKS[b])}</option>`).join("");$("copyTo").value=copyTarget;
   $("tpl").textContent=S.template||t("tpl_builtin");$("out").textContent=S.output||t("not_chosen");
   for(const k of["kits","name","seed"])if(document.activeElement!==$(k))$(k).value=S[k];
-  for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput","warpBpm","transposeKey"])$(k).checked=S[k];
+  for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput","warpBpm","transposeKey","matchLevel"])$(k).checked=S[k];
   $("transposeRow").style.display=S.matchKey?"flex":"none";
   const ks=allKeys(),hasKeys=ks.length>0;
   $("matchKeyOn").checked=!!S.matchKey;$("matchKeyOn").disabled=!hasKeys&&!S.matchKey;
@@ -1084,7 +1482,7 @@ function render(){
   if(S.matchKey)$("matchKeySel").value=ks.includes(S.matchKey)?S.matchKey:"random";
   $("matchKeyHint").textContent=hasKeys?t("hint_matchkey"):t("hint_matchkey_off")}
 for(const k of["kits","name","seed"])$(k).oninput=e=>{S[k]=e.target.value;save()};
-for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput","warpBpm","transposeKey"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
+for(const k of["recursive","clear","hardlink","mix","padNumbering","flatOutput","warpBpm","transposeKey","matchLevel"])$(k).onchange=async e=>{S[k]=e.target.checked;if(k==="recursive"){for(const f of S.folders)await scan(f);render()}save()};
 $("padVolume").onchange=e=>{S.padVolume=+e.target.value;render();save()};
 $("matchKeyOn").onchange=e=>{S.matchKey=e.target.checked?"random":"";render();save()};
 $("matchKeySel").onchange=e=>{S.matchKey=e.target.value;save()};
@@ -1099,7 +1497,7 @@ async function generate(){
    if(j.done){clearInterval(iv);$("go").disabled=false;if(j.error){m.className="err";m.textContent=j.error}else m.textContent=t("done")}},400)}
 setInterval(()=>api("/api/ping"),5000);
 addEventListener("pagehide",()=>navigator.sendBeacon("/api/bye?t="+TOKEN));
-(async()=>{const r=await api("/api/state");PAL=r.palette;PRESETS=r.presets||{};GROUPS=r.keywordGroups||{};GROUPNAMES=Object.keys(GROUPS);GROUPCOLORS=r.groupColors||{};MAC=r.mac;if(r.state)Object.assign(S,r.state);for(const p in S.padmap)if(!Array.isArray(S.padmap[p]))S.padmap[p]=[S.padmap[p]];
+(async()=>{const r=await api("/api/state");PAL=r.palette;PRESETS=r.presets||{};GROUPS=r.keywordGroups||{};GROUPNAMES=Object.keys(GROUPS);GROUPCOLORS=r.groupColors||{};LAYOUTS=r.layouts||LAYOUTS;MAC=r.mac;if(r.state)Object.assign(S,r.state);for(const p in S.padmap)if(!Array.isArray(S.padmap[p]))S.padmap[p]=[S.padmap[p]];
   for(const f of S.folders)if(f.pack===undefined)f.pack=false;
   LANG=S.lang&&I18N[S.lang]?S.lang:((navigator.language||"en").toLowerCase().startsWith("es")?"es":"en");S.lang=LANG;
   active=S.folders.length?S.folders[0].id:null;applyTheme();applyStatic();render();
