@@ -1375,12 +1375,19 @@ class LoopsWarpAndKey(unittest.TestCase):
         self.make("K/Kick.wav")
         xpm, _ = self.gen({1: [self.tmp / "K"]}, pad_volume_db=-6)
         i1, l1 = self.layer(xpm, 1)
-        self.assertAlmostEqual(float(i1.find("Volume").text), 0.707946 * 10 ** (-6 / 20), places=5)   # -6 dB
+        self.assertAlmostEqual(float(i1.find("Volume").text), 0.707946 * 10 ** (-6 / 40), places=5)   # -6 dB as the MPC shows it (-6 dB = 0.5012)
         self.assertEqual(l1.find("Volume").text, "1.000000")                    # the layer is not touched
         self.assertEqual(self.layer(xpm, 2)[0].find("Volume").text, "0.707946")  # an empty pad neither
         shutil.rmtree(self.tmp / "out")
         xpm, _ = self.gen({1: [self.tmp / "K"]})                                 # default: unchanged
         self.assertEqual(self.layer(xpm, 1)[0].find("Volume").text, "0.707946")
+
+    def test_volume_scale_matches_what_the_mpc_displays(self):
+        # measured on a real MPC: Volume 0.354813 shows -12 dB; 0.707946 shows 0 dB; 1.0 shows +6 dB
+        self.assertAlmostEqual(kc.volume_with_db(0.707946, -12), 0.354813, places=5)
+        self.assertAlmostEqual(kc.volume_with_db(0.707946, -6), 0.50119, places=4)
+        self.assertEqual(kc.volume_with_db(0.707946, 6), 1.0)
+        self.assertEqual(kc.volume_with_db(0.9, 6), 1.0)             # never above +6 dB
 
     def test_gui_volume_is_clamped(self):
         self.assertEqual([gui.clean_volume_db(v) for v in (-6, "-3", 0, 3, -30, None, "x")], [-6, -3, 0, 0, 0, 0, 0])
@@ -1499,13 +1506,13 @@ class LevelsLocksAndPreview(unittest.TestCase):
         pads = {1: [self.tmp / "L"], 2: [self.tmp / "M"], 3: [self.tmp / "Q"]}
         root, logs = self.gen(pads, match_level=True)
         u = 0.707946
-        self.assertAlmostEqual(self.vol(root, 1), u * 10 ** (-6.02 / 20), places=2)       # loud: cut 6 dB
+        self.assertAlmostEqual(self.vol(root, 1), u * 10 ** (-6.02 / 40), places=2)       # loud: cut 6 dB
         self.assertAlmostEqual(self.vol(root, 2), u, places=3)                          # median: untouched
-        self.assertAlmostEqual(self.vol(root, 3), min(1.0, u * 10 ** (3.0 / 20)), places=2)   # quiet: +3 dB
+        self.assertAlmostEqual(self.vol(root, 3), min(1.0, u * 10 ** (3.0 / 40)), places=2)   # quiet: +3 dB
         self.assertTrue(any("Levels evened out: 2 pad(s)" in l for l in logs), logs)
         shutil.rmtree(self.tmp / "out")
         root, _ = self.gen(pads, match_level=True, pad_volume_db=-6)
-        self.assertAlmostEqual(self.vol(root, 2), u * 10 ** (-6 / 20), places=3)
+        self.assertAlmostEqual(self.vol(root, 2), u * 10 ** (-6 / 40), places=3)
         shutil.rmtree(self.tmp / "out")
         root, _ = self.gen(pads)
         self.assertEqual(self.vol(root, 1), 0.707946)                                    # off by default

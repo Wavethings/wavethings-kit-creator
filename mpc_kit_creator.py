@@ -21,7 +21,7 @@ import argparse, filecmp, gzip, json, os, random, re, shutil, sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 AUDIO_EXTS = {".wav", ".aif", ".aiff"}
 
@@ -966,6 +966,13 @@ def level_gains(levels):
 PAD_UNITY = 0.707946        # an MPC pad's Volume at 0 dB (1.0 is +6 dB)
 
 
+def volume_with_db(volume, db):
+    """A pad's Volume value after changing it by `db` as the MPC displays dB. The MPC's scale is not
+    plain amplitude: Volume 0.707946 reads 0 dB, 1.0 reads +6 dB and 0.354813 reads -12 dB, i.e.
+    the Volume goes with 10 ** (dB / 40) (confirmed on a real MPC). Capped at 1.0 (+6 dB)."""
+    return min(1.0, volume * 10 ** (db / 40))
+
+
 def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=None, volume_db=0.0):
     """Replaces sample names, program name and (optionally) mute groups; the rest is untouched.
     extras: {pad: {"frames": n, "bpm": x, "tune": semitones}} per assigned pad —
@@ -975,7 +982,7 @@ def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=
       tune: semitones added to the sample's coarse tune (to bring it to the kit's key);
       gain: extra dB on the pad's volume (level matching), added to volume_db.
     volume_db: gain in dB (0 or negative) applied to every assigned pad, on top of whatever
-      volume the template's pad already has (0 dB on an MPC pad is a Volume of 0.707946)."""
+      volume the template's pad already has, in the dB the MPC displays (see volume_with_db)."""
     def fill_instrument(m):
         head, num, body, tail = m.groups()
         pad = int(num)
@@ -993,7 +1000,7 @@ def build_xpm(template, name, assignment, clear_others, mutegroups=None, extras=
         if total_db and pad in assignment:
             cur = re.search(r"<Volume>([\d.]+)</Volume>", body)         # the pad's own, before its layers
             if cur:
-                body = _set_tag(body, "Volume", f"{min(1.0, float(cur.group(1)) * 10 ** (total_db / 20)):.6f}")
+                body = _set_tag(body, "Volume", f"{volume_with_db(float(cur.group(1)), total_db):.6f}")
         if ex and pad in assignment:
             frames = ex.get("frames")
             if frames and frames > LONG_SAMPLE:

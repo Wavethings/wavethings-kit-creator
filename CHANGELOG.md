@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/), versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.15.1] - 2026-10-24
+
+### Fixed
+- **The dB values were doubled on the MPC.** A "-6 dB" default pad volume showed -12 dB on a real MPC. The
+  MPC's volume scale is not plain amplitude: its Volume value follows `10 ** (dB / 40)` (0.707946 = 0 dB,
+  1.0 = +6 dB, 0.354813 = -12 dB). The default pad volume and the level matching now use that scale, so
+  -6 dB shows -6 dB (Volume 0.501187) and the +3 dB boost limit really is +3 dB. Kits generated with
+  1.14.0 - 1.15.0 and a non-zero volume or level matching are twice as quiet as intended: regenerate them.
+
 ## [1.15.0] - 2026-10-24
 
 ### Added
@@ -31,7 +40,7 @@ All notable changes to this project are documented here. Format based on
 ### Added
 - **Default pad volume** (Options > Samples): 0 dB (unchanged) down to -6 dB in 1 dB steps, applied to
   every assigned pad on top of the pad's own volume (0 dB on an MPC pad is a Volume of 0.707946, so
-  -6 dB gives 0.354813). Samples straight from a pack are usually mastered hot. Command line:
+  -6 dB gives 0.354813 — **wrong, see 1.15.1**). Samples straight from a pack are usually mastered hot. Command line:
   `--volume -6` (0 to -24), config `"pad_volume_db"`. Empty pads and the layer's own volume are untouched.
 
 ### Fixed
